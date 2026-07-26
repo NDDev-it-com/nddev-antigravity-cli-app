@@ -10,6 +10,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SETUP_IDS = ["safe", "balanced", "full-auto"]
+MANAGED_LAUNCH_OPTION_NAMES = [
+    "--sandbox",
+    "--dangerously-skip-permissions",
+    "--mode",
+    "--cwd",
+]
 MANAGED_FILES = [
     ".gemini/antigravity-cli/settings.json",
     ".gemini/antigravity-cli/plugins/nddev-builder/plugin.json",
@@ -140,6 +146,8 @@ def main() -> int:
             errors.append("build/manifest.json: official artifact software install required")
         elif software.get("npm") is not None or software.get("pip") is not None:
             errors.append("build/manifest.json: npm/pip software install must stay null")
+        elif software.get("artifact_pin_fields") != ["sha256", "size"]:
+            errors.append("build/manifest.json: artifact pins must include sha256 and size")
         builder = manifest.get("builder")
         if not isinstance(builder, dict) or builder.get("projection") != "native-plugin":
             errors.append("build/manifest.json: native-plugin builder projection required")
@@ -159,6 +167,8 @@ def main() -> int:
             errors.append("config/nddev-contract.json: official artifact software install required")
         elif software.get("npm") is not None or software.get("pip") is not None:
             errors.append("config/nddev-contract.json: npm/pip software install must stay null")
+        elif software.get("artifact_pin_fields") != ["sha256", "size"]:
+            errors.append("config/nddev-contract.json: artifact pins must include sha256 and size")
         builder = contract.get("builder")
         if not isinstance(builder, dict) or builder.get("projection") != "native-plugin":
             errors.append("config/nddev-contract.json: native-plugin builder projection required")
@@ -193,6 +203,8 @@ def main() -> int:
                     errors.append(f"references/antigravity-cli-baseline.json: unexpected asset {name}")
                 if not isinstance(meta, dict) or len(str(meta.get("sha256", ""))) != 64:
                     errors.append(f"references/antigravity-cli-baseline.json: missing sha256 for {name}")
+                if not isinstance(meta, dict) or not isinstance(meta.get("size"), int):
+                    errors.append(f"references/antigravity-cli-baseline.json: missing size for {name}")
 
     for setup_id in SETUP_IDS:
         check_setup(setup_id, errors)
@@ -210,6 +222,8 @@ def main() -> int:
             errors.append(
                 f"{payload_name}: launch must require current target-owned software"
             )
+        if launch.get("managed_override_args_blocked") != MANAGED_LAUNCH_OPTION_NAMES:
+            errors.append(f"{payload_name}: managed launch override flag policy mismatch")
     for relative in (
         "README.md",
         "AGENTS.md",

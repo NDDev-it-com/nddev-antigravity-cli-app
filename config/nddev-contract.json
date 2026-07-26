@@ -42,6 +42,7 @@
     "stage_and_atomic_swap": true,
     "rollback_on_failure": true,
     "artifact_reader": "bounded single-member extraction; rejects traversal, symlink, hardlink, and device candidates",
+    "artifact_pin_fields": ["sha256", "size"],
     "npm": null,
     "pip": null
   },
@@ -103,6 +104,12 @@
     "forwards_child_exit_code": true,
     "target_environment_scope": "child-process-only",
     "credential_env_inherited": false,
+    "managed_override_args_blocked": [
+      "--sandbox",
+      "--dangerously-skip-permissions",
+      "--mode",
+      "--cwd"
+    ],
     "successful_child_output_wrapped": false
   },
   "safety": {

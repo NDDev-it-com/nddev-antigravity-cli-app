@@ -25,9 +25,9 @@ import tempfile
 import time
 import urllib.request
 import zipfile
-from io import BytesIO
 from collections.abc import Iterator
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
@@ -57,20 +57,30 @@ OFFICIAL_ASSETS = {
     ("linux", "aarch64"): (
         "agy_cli_linux_arm64.tar.gz",
         "0d6d488851745e80e69b8935d063e742945811b47111994b1a6dbd27df3010d5",
+        49049369,
     ),
     ("linux", "x86_64"): (
         "agy_cli_linux_x64.tar.gz",
         "946cd06258d0ede72d0311550c914315798821f6a397f53ac760919826a19af4",
+        52427182,
     ),
     ("darwin", "aarch64"): (
         "agy_cli_mac_arm64.tar.gz",
         "1ed31957d30e2d9735b1ce545a1e9106233bf7ce07739ea1f883957f5d240bed",
+        46174321,
     ),
     ("darwin", "x86_64"): (
         "agy_cli_mac_x64.tar.gz",
         "67924f137f1ab884415fa5ab45de592d1d037eacb45be90f67d0bc6dd181498d",
+        50435519,
     ),
 }
+MANAGED_LAUNCH_OPTION_NAMES = (
+    "--sandbox",
+    "--dangerously-skip-permissions",
+    "--mode",
+    "--cwd",
+)
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 SETTINGS = ".gemini/antigravity-cli/settings.json"
@@ -167,6 +177,14 @@ def is_owner_only_file(info: os.stat_result) -> bool:
     return True
 
 
+def is_owner_only_executable(info: os.stat_result) -> bool:
+    if stat.S_IMODE(info.st_mode) != OWNER_EXEC_MODE:
+        return False
+    if hasattr(os, "geteuid") and owner_of(info) != os.geteuid():
+        return False
+    return True
+
+
 def safe_relative_path(relative: str) -> Path:
     path = Path(relative)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
@@ -207,6 +225,13 @@ def require_regular_file(path: Path, label: str, *, owner_only: bool) -> os.stat
         fail(f"{label} must not have hard-link aliases")
     if owner_only and not is_owner_only_file(info):
         fail(f"{label} must be owned by the current user with mode 0600")
+    return info
+
+
+def require_executable_file(path: Path, label: str) -> os.stat_result:
+    info = require_regular_file(path, label, owner_only=False)
+    if not is_owner_only_executable(info):
+        fail(f"{label} must be owned by the current user with mode 0700")
     return info
 
 
@@ -696,6 +721,25 @@ def current_platform_asset() -> tuple[str, str]:
         arch = "aarch64"
     else:
         fail(f"unsupported Antigravity CLI installer architecture: {machine}")
+    asset_name, sha256, _ = OFFICIAL_ASSETS[(os_id, arch)]
+    return asset_name, sha256
+
+
+def current_platform_asset_with_size() -> tuple[str, str, int]:
+    system = sys.platform
+    if system.startswith("linux"):
+        os_id = "linux"
+    elif system == "darwin":
+        os_id = "darwin"
+    else:
+        fail(f"unsupported Antigravity CLI installer platform: {system}")
+    machine = os.uname().machine.lower()
+    if machine in {"x86_64", "amd64"}:
+        arch = "x86_64"
+    elif machine in {"arm64", "aarch64"}:
+        arch = "aarch64"
+    else:
+        fail(f"unsupported Antigravity CLI installer architecture: {machine}")
     return OFFICIAL_ASSETS[(os_id, arch)]
 
 
@@ -839,6 +883,7 @@ def software_stamp(
     artifact_sha256: str,
     binary_sha256: str,
     source_url: str,
+    artifact_size: int,
 ) -> dict[str, Any]:
     return {
         "schema_version": SOFTWARE_STAMP_SCHEMA,
@@ -849,6 +894,7 @@ def software_stamp(
         "version": CLI_VERSION,
         "official_source": source_url,
         "asset_name": asset_name,
+        "artifact_size": artifact_size,
         "artifact_sha256": artifact_sha256,
         "binary_sha256": binary_sha256,
         "installed_at": int(time.time()),
@@ -869,6 +915,7 @@ def load_software_stamp(target: Path) -> dict[str, Any] | None:
         "version",
         "official_source",
         "asset_name",
+        "artifact_size",
         "artifact_sha256",
         "binary_sha256",
         "installed_at",
@@ -890,12 +937,15 @@ def load_software_stamp(target: Path) -> dict[str, Any] | None:
             fail(f"software stamp {key} must be a lowercase SHA-256 digest")
     if not isinstance(stamp["installed_at"], int):
         fail("software stamp installed_at must be an integer")
+    if not isinstance(stamp["artifact_size"], int) or stamp["artifact_size"] <= 0:
+        fail("software stamp artifact_size must be a positive integer")
     return stamp
 
 
-def read_optional_software_file(path: Path, label: str) -> bytes | None:
+def read_optional_software_executable(path: Path, label: str) -> bytes | None:
     if not path.exists() and not path.is_symlink():
         return None
+    require_executable_file(path, label)
     return read_regular_file(
         path,
         label,
@@ -943,8 +993,10 @@ def software_status(target: Path) -> dict[str, Any]:
         reject_existing_software_ancestor_links(
             target, version_binary, "managed software version binary"
         )
-        binary_content = read_optional_software_file(binary, f"managed software binary {binary}")
-        version_binary_content = read_optional_software_file(
+        binary_content = read_optional_software_executable(
+            binary, f"managed software binary {binary}"
+        )
+        version_binary_content = read_optional_software_executable(
             version_binary, f"managed software version binary {version_binary}"
         )
         if binary_content is None:
@@ -974,12 +1026,15 @@ def software_status(target: Path) -> dict[str, Any]:
             and sha256_bytes(binary_content) == stamp["binary_sha256"]
             and sha256_bytes(version_binary_content) == stamp["binary_sha256"]
         )
-        expected_asset, expected_artifact_sha = current_platform_asset()
+        expected_asset, expected_artifact_sha, expected_artifact_size = (
+            current_platform_asset_with_size()
+        )
         expected_source = expected_official_source(expected_asset)
         expected_identity = {
             "build_version": VERSION,
             "version": CLI_VERSION,
             "asset_name": expected_asset,
+            "artifact_size": expected_artifact_size,
             "artifact_sha256": expected_artifact_sha,
             "official_source": expected_source,
         }
@@ -1028,18 +1083,22 @@ def ensure_real_directory_path(path: Path, label: str) -> None:
 
 
 def prepare_cli_artifact() -> dict[str, Any]:
-    asset_name, expected_sha = current_platform_asset()
+    asset_name, expected_sha, expected_size = current_platform_asset_with_size()
     test_artifact_url = os.environ.get(INTERNAL_ARTIFACT_ENV)
     source_url = test_artifact_url or expected_official_source(asset_name)
     archive = read_artifact(source_url)
     artifact_digest = sha256_bytes(archive)
-    if test_artifact_url is None and artifact_digest != expected_sha:
-        fail(f"official artifact digest mismatch for {asset_name}")
+    if test_artifact_url is None:
+        if len(archive) != expected_size:
+            fail(f"official artifact size mismatch for {asset_name}")
+        if artifact_digest != expected_sha:
+            fail(f"official artifact digest mismatch for {asset_name}")
     binary = extract_cli_binary(archive, asset_name)
     binary_digest = sha256_bytes(binary)
     return {
         "asset_name": asset_name,
         "artifact_sha256": artifact_digest,
+        "artifact_size": len(archive),
         "binary": binary,
         "binary_sha256": binary_digest,
         "source_url": source_url,
@@ -1105,7 +1164,7 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
     changed = []
     if before_binary != artifact["binary"]:
         changed.append("bin/agy")
-    before_version_binary = read_optional_software_file(
+    before_version_binary = read_optional_software_executable(
         version_binary, f"managed software version binary {version_binary}"
     )
     if before_version_binary != artifact["binary"]:
@@ -1117,6 +1176,7 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
             artifact_sha256=artifact["artifact_sha256"],
             binary_sha256=artifact["binary_sha256"],
             source_url=artifact["source_url"],
+            artifact_size=artifact["artifact_size"],
         )
     )
     if before_stamp != stamp_bytes:
@@ -1170,6 +1230,7 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
         "changed": changed,
         "asset_name": artifact["asset_name"],
         "artifact_sha256": artifact["artifact_sha256"],
+        "artifact_size": artifact["artifact_size"],
         "binary_sha256": artifact["binary_sha256"],
         "managed_command": str(binary_path),
     }
@@ -1506,14 +1567,34 @@ def build_launch_env(target: Path) -> dict[str, str]:
     return env
 
 
+def validate_launch_args(child_args: list[str]) -> None:
+    for argument in child_args:
+        if argument == "--":
+            continue
+        for option in MANAGED_LAUNCH_OPTION_NAMES:
+            if argument == option or argument.startswith(f"{option}="):
+                fail(
+                    "launch argument overrides managed Antigravity CLI setup scope: "
+                    f"{argument}"
+                )
+
+
+def validate_launch_ready(target: Path, child_args: list[str]) -> Path:
+    validate_launch_args(child_args)
+    with target_lock(target):
+        require_clean_managed(target)
+        status = software_status(target)
+        if not status["installed"] or not status["current"]:
+            fail("launch requires current target-owned Antigravity CLI software")
+        executable = managed_cli_path(target)
+        if not executable.is_absolute() or executable.is_symlink():
+            fail("managed agy executable must be an absolute non-symlink path")
+        require_executable_file(executable, f"managed agy executable {executable}")
+        return executable
+
+
 def launch(target: Path, child_args: list[str]) -> int:
-    require_clean_managed(target)
-    status = software_status(target)
-    if not status["installed"] or not status["current"]:
-        fail("launch requires current target-owned Antigravity CLI software")
-    executable = managed_cli_path(target)
-    if not executable.is_absolute() or executable.is_symlink():
-        fail("managed agy executable must be an absolute non-symlink path")
+    executable = validate_launch_ready(target, child_args)
     return subprocess.call([str(executable), *child_args], env=build_launch_env(target))
 
 

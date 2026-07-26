@@ -17,8 +17,8 @@ does not install into a live user home or system prefix.
 
 Production installs use only the official Antigravity CLI GitHub release
 artifacts for version 1.1.7. The current platform asset name and artifact
-SHA-256 are pinned in `references/antigravity-cli-baseline.json`; npm and pip
-install paths are intentionally unsupported.
+SHA-256 plus size are pinned in `references/antigravity-cli-baseline.json`; npm
+and pip install paths are intentionally unsupported.
 
 The archive reader never extracts an archive wholesale. It reads exactly one
 regular `agy` or `agy.exe` member from the archive stream, rejects absolute,
@@ -37,3 +37,11 @@ The managed executable is written to:
 Updates stage a complete version tree under the target and atomically rename it
 into place. On failure, the manager restores the previous version tree, the
 visible `bin/agy`, and the software stamp.
+
+## Launch safety
+
+`launch` validates the managed setup and target-owned `bin/agy` while holding
+the target lock, releases the lock before starting the child process, and never
+executes a binary from `PATH`. It rejects documented Antigravity CLI override
+flags that would replace the managed sandbox, permission, execution-mode, or
+working-directory scope for the session.

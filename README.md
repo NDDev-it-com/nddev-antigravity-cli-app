@@ -62,7 +62,8 @@ tree, `bin/agy`, and the software stamp.
 `software-status` reports both `installed` and `current`: `installed` means the
 target has a structurally complete binary plus matching stamp digest; `current`
 additionally requires the stamp to match this module's exact current version,
-official source URL, current platform asset, artifact SHA-256, and build.
+official source URL, current platform asset, artifact SHA-256 and size pins, and
+build.
 
 Launch Antigravity CLI through the managed target:
 
@@ -73,8 +74,11 @@ python3 cli-tools/nddev_antigravity_cli.py launch --target /absolute/agy-home --
 `launch` sets `HOME` to the managed target and places XDG directories under the
 same target for the child process. It requires `software-status` to report
 `installed=true` and `current=true`, executes only the absolute target-owned
-`bin/agy`, and never falls back to `PATH`. Provider credential environment
-variables are not inherited.
+`bin/agy`, and never falls back to `PATH`. It validates the managed target while
+holding the target lock, releases the lock before starting the child process,
+and rejects documented Antigravity CLI flags that override managed sandbox,
+permission, execution-mode, or working-directory scope. Provider credential
+environment variables are not inherited.
 
 ## Ownership
 

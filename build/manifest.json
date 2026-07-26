@@ -76,7 +76,13 @@
     "path_fallback": false,
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
-    "credential_env_inherited": false
+    "credential_env_inherited": false,
+    "managed_override_args_blocked": [
+      "--sandbox",
+      "--dangerously-skip-permissions",
+      "--mode",
+      "--cwd"
+    ]
   },
   "software_install": {
     "supported": true,
@@ -93,6 +99,7 @@
     "stage_and_atomic_swap": true,
     "managed_command": "bin/agy",
     "layout": ".nddev-software/antigravity-cli/versions/1.1.7/",
+    "artifact_pin_fields": ["sha256", "size"],
     "npm": null,
     "pip": null
   },
