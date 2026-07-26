@@ -11,5 +11,5 @@ Use current Google Antigravity CLI names and documented surfaces:
 - `~/.gemini/antigravity-cli/plugins/<plugin_name>/`
 - plugin `skills/`, `agents/`, and `rules/`
 
-Do not introduce deprecated Gemini CLI implementation paths, live user state,
+Do not introduce deprecated predecessor implementation identities, live user state,
 credentials, or unsupported marketplace formats.
