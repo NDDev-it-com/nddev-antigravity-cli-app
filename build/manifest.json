@@ -44,7 +44,10 @@
       "apply",
       "switch",
       "restore",
-      "remove"
+      "remove",
+      "software-status",
+      "install-cli",
+      "update-cli"
     ],
     "target_required": [
       "status",
@@ -54,6 +57,9 @@
       "switch",
       "restore",
       "remove",
+      "software-status",
+      "install-cli",
+      "update-cli",
       "launch"
     ],
     "plan_mutates": false,
@@ -61,13 +67,34 @@
   },
   "runtime_launch": {
     "executable": "agy",
+    "managed_executable": "bin/agy",
     "manager_command": "python3 cli-tools/nddev_antigravity_cli.py launch --target <absolute-home-target> -- [args...]",
     "target_environment_scope": "child-process-only",
     "home_bound": true,
     "requires_clean_managed_target": true,
+    "requires_current_target_owned_software": true,
+    "path_fallback": false,
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "credential_env_inherited": false
+  },
+  "software_install": {
+    "supported": true,
+    "mechanism": "official-github-release-artifact",
+    "version": "1.1.7",
+    "command": "agy",
+    "status_command": "python3 cli-tools/nddev_antigravity_cli.py software-status --target <absolute-home-target> [--json]",
+    "install_command": "python3 cli-tools/nddev_antigravity_cli.py install-cli --target <absolute-home-target> [--json]",
+    "update_command": "python3 cli-tools/nddev_antigravity_cli.py update-cli --target <absolute-home-target> [--json]",
+    "status_fields": ["installed", "current", "drift"],
+    "install_precondition": "absent managed software",
+    "update_precondition": "existing managed software",
+    "update_current_behavior": "idempotent no-op without downloading",
+    "stage_and_atomic_swap": true,
+    "managed_command": "bin/agy",
+    "layout": ".nddev-software/antigravity-cli/versions/1.1.7/",
+    "npm": null,
+    "pip": null
   },
   "backup_policy": {
     "location": "sibling .<target-name>.nddev-antigravity-cli-backups",

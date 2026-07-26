@@ -39,6 +39,31 @@ python3 cli-tools/nddev_antigravity_cli.py restore --backup 0 --target /absolute
 python3 cli-tools/nddev_antigravity_cli.py remove --target /absolute/agy-home --json
 ```
 
+## Software lifecycle
+
+The setup lifecycle and CLI binary lifecycle are separate. `install-cli` and
+`update-cli` install the current `agy` binary into the explicit target from the
+pinned official GitHub release artifact for Antigravity CLI 1.1.7. The manager
+does not use npm or pip.
+
+```bash
+python3 cli-tools/nddev_antigravity_cli.py software-status --target /absolute/agy-home --json
+python3 cli-tools/nddev_antigravity_cli.py install-cli --target /absolute/agy-home --json
+python3 cli-tools/nddev_antigravity_cli.py update-cli --target /absolute/agy-home --json
+```
+
+`install-cli` requires absent managed software. `update-cli` requires existing
+managed software and is an idempotent no-op when `software-status` reports
+`current=true`. The target-owned binary is written to `bin/agy` and mirrored
+under `.nddev-software/antigravity-cli/versions/1.1.7/`. Updates stage a full
+version tree and atomically swap it into place; rollback restores the version
+tree, `bin/agy`, and the software stamp.
+
+`software-status` reports both `installed` and `current`: `installed` means the
+target has a structurally complete binary plus matching stamp digest; `current`
+additionally requires the stamp to match this module's exact current version,
+official source URL, current platform asset, artifact SHA-256, and build.
+
 Launch Antigravity CLI through the managed target:
 
 ```bash
@@ -46,8 +71,10 @@ python3 cli-tools/nddev_antigravity_cli.py launch --target /absolute/agy-home --
 ```
 
 `launch` sets `HOME` to the managed target and places XDG directories under the
-same target for the child process. Provider credential environment variables are
-not inherited.
+same target for the child process. It requires `software-status` to report
+`installed=true` and `current=true`, executes only the absolute target-owned
+`bin/agy`, and never falls back to `PATH`. Provider credential environment
+variables are not inherited.
 
 ## Ownership
 

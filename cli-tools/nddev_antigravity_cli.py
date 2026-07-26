@@ -20,10 +20,15 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
+import urllib.request
+import zipfile
+from io import BytesIO
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,13 +37,40 @@ VERSION = (ROOT / "VERSION").read_text(encoding="ascii").strip()
 PRODUCT_NAME = "nddev-antigravity-cli-app"
 STAMP_NAME = "NDDEV-ANTIGRAVITY-CLI-SETUP.json"
 BACKUP_NAME = "NDDEV-ANTIGRAVITY-CLI-BACKUP.json"
+SOFTWARE_STAMP_NAME = "NDDEV-ANTIGRAVITY-CLI-SOFTWARE.json"
 STAMP_SCHEMA = 1
 BACKUP_SCHEMA = 1
+SOFTWARE_STAMP_SCHEMA = 1
 MAX_BACKUPS = 10
 OWNER_FILE_MODE = 0o600
 OWNER_DIR_MODE = 0o700
+OWNER_EXEC_MODE = 0o700
 METADATA_MAX_BYTES = 256 * 1024
 MANAGED_PAYLOAD_MAX_BYTES = 1024 * 1024
+SOFTWARE_ARTIFACT_MAX_BYTES = 300 * 1024 * 1024
+CLI_VERSION = "1.1.7"
+CLI_COMMAND = "agy"
+RELEASE_BASE_URL = (
+    "https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.7"
+)
+OFFICIAL_ASSETS = {
+    ("linux", "aarch64"): (
+        "agy_cli_linux_arm64.tar.gz",
+        "0d6d488851745e80e69b8935d063e742945811b47111994b1a6dbd27df3010d5",
+    ),
+    ("linux", "x86_64"): (
+        "agy_cli_linux_x64.tar.gz",
+        "946cd06258d0ede72d0311550c914315798821f6a397f53ac760919826a19af4",
+    ),
+    ("darwin", "aarch64"): (
+        "agy_cli_mac_arm64.tar.gz",
+        "1ed31957d30e2d9735b1ce545a1e9106233bf7ce07739ea1f883957f5d240bed",
+    ),
+    ("darwin", "x86_64"): (
+        "agy_cli_mac_x64.tar.gz",
+        "67924f137f1ab884415fa5ab45de592d1d037eacb45be90f67d0bc6dd181498d",
+    ),
+}
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 SETTINGS = ".gemini/antigravity-cli/settings.json"
@@ -79,6 +111,8 @@ SECRET_ENV_NAMES = {
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
 }
+INTERNAL_ARTIFACT_ENV = "NDDEV_ANTIGRAVITY_CLI_TEST_ARTIFACT_URL"
+INTERNAL_FAIL_AFTER_VERSION_SWAP_ENV = "NDDEV_ANTIGRAVITY_CLI_TEST_FAIL_AFTER_VERSION_SWAP"
 
 
 class ManagerError(Exception):
@@ -397,6 +431,30 @@ def target_path(target: Path, relative: str) -> Path:
     return target / safe_relative_path(relative)
 
 
+def software_root(target: Path) -> Path:
+    return target / ".nddev-software" / "antigravity-cli"
+
+
+def software_version_dir(target: Path, version: str = CLI_VERSION) -> Path:
+    return software_root(target) / "versions" / version
+
+
+def managed_cli_path(target: Path) -> Path:
+    return target / "bin" / CLI_COMMAND
+
+
+def software_stamp_path(target: Path) -> Path:
+    return software_root(target) / SOFTWARE_STAMP_NAME
+
+
+def expected_official_source(asset_name: str) -> str:
+    return f"{RELEASE_BASE_URL}/{asset_name}"
+
+
+def software_tree_binary_path(target: Path, version: str = CLI_VERSION) -> Path:
+    return software_version_dir(target, version) / CLI_COMMAND
+
+
 def target_file_exists(target: Path, relative: str) -> bool:
     path = target_path(target, relative)
     try:
@@ -608,6 +666,518 @@ def atomic_write(path: Path, content: bytes) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def atomic_write_executable(path: Path, content: bytes) -> None:
+    make_parent_directories(path)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+        os.chmod(temporary, OWNER_EXEC_MODE)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def current_platform_asset() -> tuple[str, str]:
+    system = sys.platform
+    if system.startswith("linux"):
+        os_id = "linux"
+    elif system == "darwin":
+        os_id = "darwin"
+    else:
+        fail(f"unsupported Antigravity CLI installer platform: {system}")
+    machine = os.uname().machine.lower()
+    if machine in {"x86_64", "amd64"}:
+        arch = "x86_64"
+    elif machine in {"arm64", "aarch64"}:
+        arch = "aarch64"
+    else:
+        fail(f"unsupported Antigravity CLI installer architecture: {machine}")
+    return OFFICIAL_ASSETS[(os_id, arch)]
+
+
+def read_artifact(source: str) -> bytes:
+    if source.startswith("file://"):
+        path = Path(source[7:])
+        content, _ = read_regular_file(
+            path,
+            f"software artifact {path}",
+            max_bytes=SOFTWARE_ARTIFACT_MAX_BYTES,
+        )
+        return content
+    request = urllib.request.Request(
+        source,
+        headers={"User-Agent": f"{PRODUCT_NAME}/{VERSION}"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        expected = response.headers.get("Content-Length")
+        blocks: list[bytes] = []
+        total = 0
+        while True:
+            block = response.read(1024 * 1024)
+            if not block:
+                break
+            total += len(block)
+            if total > SOFTWARE_ARTIFACT_MAX_BYTES:
+                fail("software artifact exceeds the bounded download limit")
+            blocks.append(block)
+    content = b"".join(blocks)
+    if expected is not None and int(expected) != len(content):
+        fail("software artifact download length changed while reading")
+    return content
+
+
+def extract_cli_binary(archive: bytes, asset_name: str) -> bytes:
+    if asset_name.endswith(".tar.gz"):
+        return extract_cli_binary_from_tar(archive)
+    if asset_name.endswith(".zip"):
+        return extract_cli_binary_from_zip(archive)
+    fail(f"unsupported Antigravity CLI artifact type: {asset_name}")
+
+
+def validate_archive_member_path(raw_name: str, label: str) -> Path:
+    if "\x00" in raw_name:
+        fail(f"software artifact contains a NUL byte in a {label} path")
+    normalized = raw_name.replace("\\", "/")
+    if normalized.startswith("//"):
+        fail(f"software artifact contains an unsafe {label} path")
+    path = PurePosixPath(normalized)
+    first_part = path.parts[0] if path.parts else ""
+    if (
+        path.is_absolute()
+        or not path.parts
+        or ":" in first_part
+        or re.fullmatch(r"[A-Za-z]:.*", first_part) is not None
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        fail(f"software artifact contains an unsafe {label} path")
+    return Path(*path.parts)
+
+
+def is_cli_candidate(path: Path) -> bool:
+    return path.name in {CLI_COMMAND, "agy.exe"}
+
+
+def extract_cli_binary_from_tar(archive: bytes) -> bytes:
+    candidates: list[bytes] = []
+    with tarfile.open(fileobj=BytesIO(archive), mode="r:gz") as tar:
+        for member in tar:
+            path = validate_archive_member_path(member.name, "tar")
+            if member.issym() or member.islnk() or member.isdev() or member.isdir():
+                if is_cli_candidate(path):
+                    fail("software artifact CLI candidate must be a regular tar file")
+                continue
+            if not member.isfile():
+                if is_cli_candidate(path):
+                    fail("software artifact CLI candidate must be a regular tar file")
+                continue
+            if member.size > SOFTWARE_ARTIFACT_MAX_BYTES:
+                fail("software artifact CLI binary exceeds the decompressed size limit")
+            if not is_cli_candidate(path):
+                continue
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                fail("software artifact CLI binary could not be read")
+            content = extracted.read(SOFTWARE_ARTIFACT_MAX_BYTES + 1)
+            if len(content) > SOFTWARE_ARTIFACT_MAX_BYTES or len(content) != member.size:
+                fail("software artifact CLI binary size changed while reading")
+            candidates.append(content)
+            if len(candidates) > 1:
+                fail("software artifact contains duplicate CLI binary candidates")
+    if len(candidates) != 1:
+        fail(f"software artifact must contain exactly one {CLI_COMMAND} binary")
+    return candidates[0]
+
+
+def zip_member_file_type(info: zipfile.ZipInfo) -> int:
+    mode = (info.external_attr >> 16) & 0o170000
+    return mode
+
+
+def extract_cli_binary_from_zip(archive: bytes) -> bytes:
+    candidates: list[bytes] = []
+    seen: set[str] = set()
+    with zipfile.ZipFile(BytesIO(archive)) as archive_file:
+        for info in archive_file.infolist():
+            path = validate_archive_member_path(info.filename, "zip")
+            normalized = path.as_posix()
+            if normalized in seen:
+                fail("software artifact contains duplicate zip member paths")
+            seen.add(normalized)
+            if info.is_dir():
+                continue
+            file_type = zip_member_file_type(info)
+            if file_type == stat.S_IFLNK:
+                if is_cli_candidate(path):
+                    fail("software artifact CLI candidate must not be a zip symlink")
+                continue
+            if file_type not in {0, stat.S_IFREG} and is_cli_candidate(path):
+                fail("software artifact CLI candidate must be a regular zip file")
+            if info.file_size > SOFTWARE_ARTIFACT_MAX_BYTES:
+                fail("software artifact CLI binary exceeds the decompressed size limit")
+            if not is_cli_candidate(path):
+                continue
+            with archive_file.open(info, "r") as handle:
+                content = handle.read(SOFTWARE_ARTIFACT_MAX_BYTES + 1)
+            if len(content) > SOFTWARE_ARTIFACT_MAX_BYTES or len(content) != info.file_size:
+                fail("software artifact CLI binary size changed while reading")
+            candidates.append(content)
+            if len(candidates) > 1:
+                fail("software artifact contains duplicate CLI binary candidates")
+    if len(candidates) != 1:
+        fail(f"software artifact must contain exactly one {CLI_COMMAND} binary")
+    return candidates[0]
+
+
+def software_stamp(
+    target: Path,
+    *,
+    asset_name: str,
+    artifact_sha256: str,
+    binary_sha256: str,
+    source_url: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SOFTWARE_STAMP_SCHEMA,
+        "product_name": PRODUCT_NAME,
+        "build_version": VERSION,
+        "canonical_target": str(target),
+        "command": CLI_COMMAND,
+        "version": CLI_VERSION,
+        "official_source": source_url,
+        "asset_name": asset_name,
+        "artifact_sha256": artifact_sha256,
+        "binary_sha256": binary_sha256,
+        "installed_at": int(time.time()),
+    }
+
+
+def load_software_stamp(target: Path) -> dict[str, Any] | None:
+    path = software_stamp_path(target)
+    if not path.exists() and not path.is_symlink():
+        return None
+    stamp = read_json_file(path, f"software stamp {path}", owner_only=True)
+    expected = {
+        "schema_version",
+        "product_name",
+        "build_version",
+        "canonical_target",
+        "command",
+        "version",
+        "official_source",
+        "asset_name",
+        "artifact_sha256",
+        "binary_sha256",
+        "installed_at",
+    }
+    if set(stamp) != expected:
+        fail("software stamp has invalid keys")
+    if (
+        stamp["schema_version"] != SOFTWARE_STAMP_SCHEMA
+        or stamp["product_name"] != PRODUCT_NAME
+        or stamp["canonical_target"] != str(target)
+        or stamp["command"] != CLI_COMMAND
+    ):
+        fail("software stamp identity is invalid")
+    for key in ("build_version", "version", "official_source", "asset_name"):
+        if not isinstance(stamp[key], str) or not stamp[key]:
+            fail(f"software stamp {key} must be a non-empty string")
+    for key in ("artifact_sha256", "binary_sha256"):
+        if not isinstance(stamp[key], str) or not SHA256_PATTERN.fullmatch(stamp[key]):
+            fail(f"software stamp {key} must be a lowercase SHA-256 digest")
+    if not isinstance(stamp["installed_at"], int):
+        fail("software stamp installed_at must be an integer")
+    return stamp
+
+
+def read_optional_software_file(path: Path, label: str) -> bytes | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    return read_regular_file(
+        path,
+        label,
+        owner_only=False,
+        max_bytes=SOFTWARE_ARTIFACT_MAX_BYTES,
+    )[0]
+
+
+def reject_existing_software_ancestor_links(target: Path, path: Path, label: str) -> None:
+    try:
+        relative = path.relative_to(target)
+    except ValueError:
+        fail(f"{label} is outside the canonical target")
+    current = target
+    for part in relative.parts[:-1]:
+        current = current / part
+        if not current.exists() and not current.is_symlink():
+            return
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            fail(f"{label} parent is unsafe: {current}")
+
+
+def software_status(target: Path) -> dict[str, Any]:
+    if not ensure_target_directory(target, create=False):
+        return {
+            "schema_version": 1,
+            "command": "software-status",
+            "target": str(target),
+            "installed": False,
+            "version": None,
+            "expected_version": CLI_VERSION,
+            "managed_command": str(managed_cli_path(target)),
+            "stamp": None,
+            "drift": [],
+            "current": False,
+        }
+    stamp = load_software_stamp(target)
+    binary = managed_cli_path(target)
+    version_binary = None if stamp is None else software_tree_binary_path(target, CLI_VERSION)
+    installed = False
+    drift: list[str] = []
+    if stamp is not None:
+        reject_existing_software_ancestor_links(target, binary, "managed software binary")
+        reject_existing_software_ancestor_links(
+            target, version_binary, "managed software version binary"
+        )
+        binary_content = read_optional_software_file(binary, f"managed software binary {binary}")
+        version_binary_content = read_optional_software_file(
+            version_binary, f"managed software version binary {version_binary}"
+        )
+        if binary_content is None:
+            drift.append("bin/agy")
+        else:
+            if sha256_bytes(binary_content) != stamp["binary_sha256"]:
+                drift.append("bin/agy")
+        if version_binary_content is None:
+            drift.append(
+                str(
+                    Path(".nddev-software/antigravity-cli/versions")
+                    / CLI_VERSION
+                    / CLI_COMMAND
+                )
+            )
+        elif sha256_bytes(version_binary_content) != stamp["binary_sha256"]:
+            drift.append(
+                str(
+                    Path(".nddev-software/antigravity-cli/versions")
+                    / CLI_VERSION
+                    / CLI_COMMAND
+                )
+            )
+        installed = (
+            binary_content is not None
+            and version_binary_content is not None
+            and sha256_bytes(binary_content) == stamp["binary_sha256"]
+            and sha256_bytes(version_binary_content) == stamp["binary_sha256"]
+        )
+        expected_asset, expected_artifact_sha = current_platform_asset()
+        expected_source = expected_official_source(expected_asset)
+        expected_identity = {
+            "build_version": VERSION,
+            "version": CLI_VERSION,
+            "asset_name": expected_asset,
+            "artifact_sha256": expected_artifact_sha,
+            "official_source": expected_source,
+        }
+        for key, expected in expected_identity.items():
+            if stamp[key] != expected:
+                drift.append(key)
+    else:
+        root = software_root(target)
+        if root.is_symlink():
+            fail("software root must be a real directory")
+    if stamp is None and (
+        binary.exists()
+        or binary.is_symlink()
+        or (
+            software_root(target).exists()
+            and any(
+                path.is_file() or path.is_symlink()
+                for path in software_root(target).rglob("*")
+            )
+        )
+    ):
+        drift.append("software-stamp")
+    current = installed and not drift
+    return {
+        "schema_version": 1,
+        "command": "software-status",
+        "target": str(target),
+        "installed": installed,
+        "current": current,
+        "version": None if stamp is None else stamp["version"],
+        "expected_version": CLI_VERSION,
+        "managed_command": str(binary),
+        "stamp": None if stamp is None else str(software_stamp_path(target)),
+        "drift": drift,
+    }
+
+
+def ensure_real_directory_path(path: Path, label: str) -> None:
+    if path.exists() or path.is_symlink():
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            fail(f"{label} must be a real directory")
+        return
+    path.mkdir(mode=OWNER_DIR_MODE, parents=True)
+    os.chmod(path, OWNER_DIR_MODE)
+
+
+def prepare_cli_artifact() -> dict[str, Any]:
+    asset_name, expected_sha = current_platform_asset()
+    test_artifact_url = os.environ.get(INTERNAL_ARTIFACT_ENV)
+    source_url = test_artifact_url or expected_official_source(asset_name)
+    archive = read_artifact(source_url)
+    artifact_digest = sha256_bytes(archive)
+    if test_artifact_url is None and artifact_digest != expected_sha:
+        fail(f"official artifact digest mismatch for {asset_name}")
+    binary = extract_cli_binary(archive, asset_name)
+    binary_digest = sha256_bytes(binary)
+    return {
+        "asset_name": asset_name,
+        "artifact_sha256": artifact_digest,
+        "binary": binary,
+        "binary_sha256": binary_digest,
+        "source_url": source_url,
+    }
+
+
+def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
+    ensure_target_directory(target, create=True)
+    status = software_status(target)
+    if command == "install-cli" and (status["version"] is not None or status["drift"]):
+        fail("install-cli requires absent managed software; use update-cli for existing state")
+    if command == "update-cli" and status["version"] is None:
+        fail("update-cli requires existing managed software")
+    if command == "update-cli" and status["current"]:
+        return {
+            "schema_version": 1,
+            "command": command,
+            "operation": "current",
+            "target": str(target),
+            "version": CLI_VERSION,
+            "current": True,
+            "changed": [],
+            "managed_command": str(managed_cli_path(target)),
+        }
+
+    artifact = prepare_cli_artifact()
+    before_binary = None
+    before_stamp = None
+    binary_path = managed_cli_path(target)
+    stamp_path = software_stamp_path(target)
+    version_dir = software_version_dir(target)
+    version_binary = software_tree_binary_path(target)
+    if binary_path.exists() or binary_path.is_symlink():
+        before_binary = read_regular_file(
+            binary_path,
+            f"managed software binary {binary_path}",
+            owner_only=False,
+            max_bytes=SOFTWARE_ARTIFACT_MAX_BYTES,
+        )[0]
+    if stamp_path.exists() or stamp_path.is_symlink():
+        before_stamp = read_regular_file(
+            stamp_path,
+            f"software stamp {stamp_path}",
+            owner_only=False,
+            max_bytes=METADATA_MAX_BYTES,
+        )[0]
+    before_version_exists = False
+    root = software_root(target)
+    versions = root / "versions"
+    ensure_real_directory_path(root, "software root")
+    ensure_real_directory_path(versions, "software versions directory")
+    if version_dir.exists() or version_dir.is_symlink():
+        info = version_dir.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            fail("software version path is unsafe")
+        before_version_exists = True
+    reject_symlink_ancestors(target, "bin/agy")
+    reject_symlink_ancestors(
+        target, ".nddev-software/antigravity-cli/versions/1.1.7/agy"
+    )
+    staging = versions / f".stage-{os.getpid()}-{time.time_ns()}"
+    rollback_version = versions / f".rollback-{os.getpid()}-{time.time_ns()}"
+    changed = []
+    if before_binary != artifact["binary"]:
+        changed.append("bin/agy")
+    before_version_binary = read_optional_software_file(
+        version_binary, f"managed software version binary {version_binary}"
+    )
+    if before_version_binary != artifact["binary"]:
+        changed.append(str(Path(".nddev-software/antigravity-cli/versions/1.1.7") / CLI_COMMAND))
+    stamp_bytes = canonical_json(
+        software_stamp(
+            target,
+            asset_name=artifact["asset_name"],
+            artifact_sha256=artifact["artifact_sha256"],
+            binary_sha256=artifact["binary_sha256"],
+            source_url=artifact["source_url"],
+        )
+    )
+    if before_stamp != stamp_bytes:
+        changed.append(str(Path(".nddev-software/antigravity-cli") / SOFTWARE_STAMP_NAME))
+    try:
+        staging.mkdir(mode=OWNER_DIR_MODE)
+        atomic_write_executable(staging / CLI_COMMAND, artifact["binary"])
+        if before_version_exists:
+            version_dir.rename(rollback_version)
+        staging.rename(version_dir)
+        if os.environ.get(INTERNAL_FAIL_AFTER_VERSION_SWAP_ENV) == "1":
+            fail("injected failure after software version swap")
+        atomic_write_executable(binary_path, artifact["binary"])
+        atomic_write(stamp_path, stamp_bytes)
+    except BaseException:
+        if version_dir.exists() or version_dir.is_symlink():
+            if version_dir.is_dir() and not version_dir.is_symlink():
+                shutil.rmtree(version_dir)
+            else:
+                version_dir.unlink()
+        if rollback_version.exists():
+            rollback_version.rename(version_dir)
+        if before_binary is None:
+            with contextlib.suppress(FileNotFoundError):
+                binary_path.unlink()
+        else:
+            atomic_write_executable(binary_path, before_binary)
+        if before_stamp is None:
+            with contextlib.suppress(FileNotFoundError):
+                stamp_path.unlink()
+        else:
+            atomic_write(stamp_path, before_stamp)
+        with contextlib.suppress(FileNotFoundError):
+            shutil.rmtree(staging)
+        with contextlib.suppress(FileNotFoundError):
+            shutil.rmtree(rollback_version)
+        raise
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            shutil.rmtree(staging)
+    with contextlib.suppress(FileNotFoundError):
+        shutil.rmtree(rollback_version)
+    final_status = software_status(target)
+    return {
+        "schema_version": 1,
+        "command": command,
+        "operation": "install" if command == "install-cli" else "update",
+        "target": str(target),
+        "version": CLI_VERSION,
+        "current": final_status["current"],
+        "changed": changed,
+        "asset_name": artifact["asset_name"],
+        "artifact_sha256": artifact["artifact_sha256"],
+        "binary_sha256": artifact["binary_sha256"],
+        "managed_command": str(binary_path),
+    }
+
+
+def install_cli(target: Path, command: str) -> dict[str, Any]:
+    with target_lock(target):
+        return install_cli_unlocked(target, command)
 
 
 def remove_empty_managed_parents(target: Path, relative: str) -> None:
@@ -938,10 +1508,13 @@ def build_launch_env(target: Path) -> dict[str, str]:
 
 def launch(target: Path, child_args: list[str]) -> int:
     require_clean_managed(target)
-    executable = shutil.which("agy")
-    if executable is None:
-        fail("agy executable was not found on PATH")
-    return subprocess.call([executable, *child_args], env=build_launch_env(target))
+    status = software_status(target)
+    if not status["installed"] or not status["current"]:
+        fail("launch requires current target-owned Antigravity CLI software")
+    executable = managed_cli_path(target)
+    if not executable.is_absolute() or executable.is_symlink():
+        fail("managed agy executable must be an absolute non-symlink path")
+    return subprocess.call([str(executable), *child_args], env=build_launch_env(target))
 
 
 def emit(payload: dict[str, Any] | list[Any], *, as_json: bool) -> None:
@@ -959,6 +1532,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     list_parser.add_argument("--json", action="store_true")
 
     for name in ("status", "remove"):
+        command = subparsers.add_parser(name)
+        command.add_argument("--target")
+        command.add_argument("--json", action="store_true")
+
+    software_status_parser = subparsers.add_parser("software-status")
+    software_status_parser.add_argument("--target")
+    software_status_parser.add_argument("--json", action="store_true")
+
+    for name in ("install-cli", "update-cli"):
         command = subparsers.add_parser(name)
         command.add_argument("--target")
         command.add_argument("--json", action="store_true")
@@ -993,6 +1575,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "status":
             emit(current_status(resolve_target(args.target)), as_json=args.json)
+            return 0
+        if args.command == "software-status":
+            emit(software_status(resolve_target(args.target)), as_json=args.json)
+            return 0
+        if args.command in {"install-cli", "update-cli"}:
+            result = install_cli(resolve_target(args.target), args.command)
+            emit(result, as_json=args.json)
             return 0
         if args.command == "plan":
             emit(plan_setup(resolve_target(args.target), args.setup), as_json=args.json)

@@ -129,6 +129,17 @@ def main() -> int:
             errors.append("build/manifest.json: build_version mismatch")
         if manifest.get("setup_ids") != SETUP_IDS:
             errors.append("build/manifest.json: setup_ids mismatch")
+        policy = manifest.get("command_policy", {})
+        for command in ("software-status", "install-cli", "update-cli"):
+            if command not in policy.get("json_supported", []):
+                errors.append(f"build/manifest.json: command_policy missing {command}")
+        software = manifest.get("software_install")
+        if not isinstance(software, dict):
+            errors.append("build/manifest.json: software_install object required")
+        elif software.get("mechanism") != "official-github-release-artifact":
+            errors.append("build/manifest.json: official artifact software install required")
+        elif software.get("npm") is not None or software.get("pip") is not None:
+            errors.append("build/manifest.json: npm/pip software install must stay null")
         builder = manifest.get("builder")
         if not isinstance(builder, dict) or builder.get("projection") != "native-plugin":
             errors.append("build/manifest.json: native-plugin builder projection required")
@@ -141,6 +152,13 @@ def main() -> int:
             errors.append("config/nddev-contract.json: manifest_ref mismatch")
         if contract.get("managed_state", {}).get("target_model") != "isolated-home":
             errors.append("config/nddev-contract.json: isolated-home target model required")
+        software = contract.get("software_install")
+        if not isinstance(software, dict) or software.get("supported") is not True:
+            errors.append("config/nddev-contract.json: software_install supported object required")
+        elif software.get("mechanism") != "official-github-release-artifact":
+            errors.append("config/nddev-contract.json: official artifact software install required")
+        elif software.get("npm") is not None or software.get("pip") is not None:
+            errors.append("config/nddev-contract.json: npm/pip software install must stay null")
         builder = contract.get("builder")
         if not isinstance(builder, dict) or builder.get("projection") != "native-plugin":
             errors.append("config/nddev-contract.json: native-plugin builder projection required")
@@ -159,13 +177,44 @@ def main() -> int:
             errors.append("references/antigravity-cli-baseline.json: marketplace must be null")
         if baseline.get("runtime", {}).get("executable") != "agy":
             errors.append("references/antigravity-cli-baseline.json: executable must be agy")
+        software = baseline.get("software_install")
+        if not isinstance(software, dict):
+            errors.append("references/antigravity-cli-baseline.json: software_install required")
+        elif software.get("mechanism") != "official-github-release-artifact":
+            errors.append("references/antigravity-cli-baseline.json: official artifact install required")
+        elif software.get("npm") is not None or software.get("pip") is not None:
+            errors.append("references/antigravity-cli-baseline.json: npm/pip must stay null")
+        assets = baseline.get("release", {}).get("assets")
+        if not isinstance(assets, dict) or len(assets) != 6:
+            errors.append("references/antigravity-cli-baseline.json: exact six release assets required")
+        else:
+            for name, meta in assets.items():
+                if not name.startswith("agy_cli_"):
+                    errors.append(f"references/antigravity-cli-baseline.json: unexpected asset {name}")
+                if not isinstance(meta, dict) or len(str(meta.get("sha256", ""))) != 64:
+                    errors.append(f"references/antigravity-cli-baseline.json: missing sha256 for {name}")
 
     for setup_id in SETUP_IDS:
         check_setup(setup_id, errors)
+    for payload_name, payload in (("manifest", manifest), ("contract", contract)):
+        if payload is None:
+            continue
+        launch = payload.get("runtime_launch", {})
+        if launch.get("executable") != "agy":
+            errors.append(f"{payload_name}: runtime_launch.executable must be agy")
+        if launch.get("managed_executable") != "bin/agy":
+            errors.append(f"{payload_name}: runtime_launch.managed_executable must be bin/agy")
+        if launch.get("path_fallback") is not False:
+            errors.append(f"{payload_name}: runtime launch PATH fallback must be false")
+        if launch.get("requires_current_target_owned_software") is not True:
+            errors.append(
+                f"{payload_name}: launch must require current target-owned software"
+            )
     for relative in (
         "README.md",
         "AGENTS.md",
         "CHANGELOG.md",
+        "docs/software-lifecycle.md",
         "SECURITY.md",
         "cli-tools/nddev_antigravity_cli.py",
     ):
