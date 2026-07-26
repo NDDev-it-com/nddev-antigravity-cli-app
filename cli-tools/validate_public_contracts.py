@@ -151,9 +151,7 @@ def main() -> int:
             release = baseline.get("release", {})
             if release.get("tag") != version.get("antigravity_cli_release_tag"):
                 errors.append("references/antigravity-cli-baseline.json: release tag mismatch")
-            if release.get("published_at") != version.get(
-                "antigravity_cli_release_published_at"
-            ):
+            if release.get("published_at") != version.get("antigravity_cli_release_published_at"):
                 errors.append(
                     "references/antigravity-cli-baseline.json: release timestamp mismatch"
                 )

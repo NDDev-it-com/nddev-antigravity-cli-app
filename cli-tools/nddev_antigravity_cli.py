@@ -559,7 +559,9 @@ def snapshot_managed_files(target: Path) -> dict[str, FileSnapshot]:
 
 def assert_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
     for relative, expected in snapshot.items():
-        exists = ensure_target_directory(target, create=False) and target_file_exists(target, relative)
+        exists = ensure_target_directory(target, create=False) and target_file_exists(
+            target, relative
+        )
         if not exists:
             actual = FileSnapshot(content=None, digest=None)
         else:
@@ -582,7 +584,9 @@ def preflight_unmanaged_target(target: Path) -> None:
         settings = read_target_settings_if_present(target)
         managed = set(SETTINGS_MANAGED_KEYS) & set(settings)
         if managed:
-            fail(f"unmanaged target already has managed Antigravity settings keys: {sorted(managed)}")
+            fail(
+                f"unmanaged target already has managed Antigravity settings keys: {sorted(managed)}"
+            )
 
 
 def make_parent_directories(path: Path) -> None:
@@ -772,7 +776,10 @@ def current_status(target: Path) -> dict[str, Any]:
         "drift": drift,
         "builder": {
             "projection": "native-plugin",
-            "enabled": not any(item in drift for item in (BUILDER_PLUGIN, BUILDER_SKILL, BUILDER_AGENT, BUILDER_RULE)),
+            "enabled": not any(
+                item in drift
+                for item in (BUILDER_PLUGIN, BUILDER_SKILL, BUILDER_AGENT, BUILDER_RULE)
+            ),
         },
     }
 
