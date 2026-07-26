@@ -1,0 +1,6 @@
+{
+  "allowNonWorkspaceAccess": true,
+  "artifactReviewPolicy": "always-proceed",
+  "enableTerminalSandbox": true,
+  "toolPermission": "always-proceed"
+}

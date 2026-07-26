@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "safe",
+  "description": "Strict Antigravity CLI setup with all non-read actions reviewed, sandboxing enabled, and the NDDev builder plugin default-on.",
+  "managed_files": [
+    ".gemini/antigravity-cli/settings.json",
+    ".gemini/antigravity-cli/plugins/nddev-builder/plugin.json",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/agents/nddev-builder.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/rules/nddev-builder.md"
+  ],
+  "managed_settings": {
+    "allowNonWorkspaceAccess": false,
+    "artifactReviewPolicy": "asks-for-review",
+    "enableTerminalSandbox": true,
+    "toolPermission": "strict"
+  },
+  "builder_enabled": true
+}

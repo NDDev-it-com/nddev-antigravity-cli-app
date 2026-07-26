@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "full-auto",
+  "description": "Autonomous Antigravity CLI setup using always-proceed permissions, direct artifact writes, non-workspace access, sandboxing, and the NDDev builder plugin default-on.",
+  "managed_files": [
+    ".gemini/antigravity-cli/settings.json",
+    ".gemini/antigravity-cli/plugins/nddev-builder/plugin.json",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/agents/nddev-builder.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/rules/nddev-builder.md"
+  ],
+  "managed_settings": {
+    "allowNonWorkspaceAccess": true,
+    "artifactReviewPolicy": "always-proceed",
+    "enableTerminalSandbox": true,
+    "toolPermission": "always-proceed"
+  },
+  "builder_enabled": true
+}

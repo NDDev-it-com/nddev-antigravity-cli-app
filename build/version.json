@@ -1,4 +1,8 @@
 {
   "schema_version": 1,
-  "build_version": "0.0.0"
+  "build_version": "0.1.0",
+  "antigravity_cli_tested": "1.1.7",
+  "antigravity_cli_min": "1.1.7",
+  "python_requires": ">=3.10",
+  "runtime_baseline_ref": "references/antigravity-cli-baseline.json"
 }

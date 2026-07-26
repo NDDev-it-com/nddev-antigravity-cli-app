@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "verified_date": "2026-07-26",
+  "verified_version_ref": "build/version.json:antigravity_cli_tested",
+  "runtime": {
+    "product": "Antigravity CLI",
+    "executable": "agy",
+    "tested_version_ref": "build/version.json:antigravity_cli_tested",
+    "minimum_version_ref": "build/version.json:antigravity_cli_min"
+  },
+  "official_sources": {
+    "repository": "https://github.com/google-antigravity/antigravity-cli",
+    "overview": "https://antigravity.google/docs/cli/overview",
+    "install": "https://antigravity.google/docs/cli/install",
+    "settings": "https://antigravity.google/docs/cli/settings",
+    "permissions": "https://antigravity.google/docs/cli/permissions",
+    "sandbox": "https://antigravity.google/docs/cli/sandbox",
+    "plugins": "https://antigravity.google/docs/cli/plugins",
+    "skills": "https://antigravity.google/docs/skills",
+    "rules": "https://antigravity.google/docs/rules-workflows",
+    "reference": "https://antigravity.google/docs/cli/reference"
+  },
+  "configuration": {
+    "target_model": "isolated-home",
+    "settings_file": "~/.gemini/antigravity-cli/settings.json",
+    "keybindings_file": "~/.gemini/antigravity-cli/keybindings.json",
+    "plugin_root": "~/.gemini/antigravity-cli/plugins/",
+    "native_builder_projection": [
+      "plugin.json",
+      "skills/nddev-builder/SKILL.md",
+      "agents/nddev-builder.md",
+      "rules/nddev-builder.md"
+    ],
+    "marketplace": null
+  },
+  "permissions": {
+    "settings_key": "toolPermission",
+    "artifact_review_key": "artifactReviewPolicy",
+    "sandbox_key": "enableTerminalSandbox",
+    "non_workspace_access_key": "allowNonWorkspaceAccess",
+    "tool_permission_values": [
+      "strict",
+      "request-review",
+      "proceed-in-sandbox",
+      "always-proceed"
+    ],
+    "artifact_review_values": [
+      "asks-for-review",
+      "agent-decides",
+      "always-proceed"
+    ]
+  }
+}

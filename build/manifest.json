@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "name": "nddev-antigravity-cli-app",
+  "build_version": "0.1.0",
+  "entrypoint": "python3 cli-tools/nddev_antigravity_cli.py",
+  "source_root": "setups",
+  "setup_ids": [
+    "safe",
+    "balanced",
+    "full-auto"
+  ],
+  "managed_files": [
+    ".gemini/antigravity-cli/settings.json",
+    ".gemini/antigravity-cli/plugins/nddev-builder/plugin.json",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/agents/nddev-builder.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/rules/nddev-builder.md",
+    "NDDEV-ANTIGRAVITY-CLI-SETUP.json"
+  ],
+  "builder": {
+    "id": "nddev-builder",
+    "projection": "native-plugin",
+    "marketplace": null,
+    "status": "default-on",
+    "native_surfaces": [
+      "plugin",
+      "skills",
+      "agents",
+      "rules"
+    ],
+    "managed_files": [
+      ".gemini/antigravity-cli/plugins/nddev-builder/plugin.json",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/agents/nddev-builder.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/rules/nddev-builder.md"
+    ]
+  },
+  "command_policy": {
+    "json_supported": [
+      "list",
+      "status",
+      "plan",
+      "install",
+      "apply",
+      "switch",
+      "restore",
+      "remove"
+    ],
+    "target_required": [
+      "status",
+      "plan",
+      "install",
+      "apply",
+      "switch",
+      "restore",
+      "remove",
+      "launch"
+    ],
+    "plan_mutates": false,
+    "restore_backup_option": "--backup <0..9>"
+  },
+  "runtime_launch": {
+    "executable": "agy",
+    "manager_command": "python3 cli-tools/nddev_antigravity_cli.py launch --target <absolute-home-target> -- [args...]",
+    "target_environment_scope": "child-process-only",
+    "home_bound": true,
+    "requires_clean_managed_target": true,
+    "forwards_arguments": true,
+    "forwards_child_exit_code": true,
+    "credential_env_inherited": false
+  },
+  "backup_policy": {
+    "location": "sibling .<target-name>.nddev-antigravity-cli-backups",
+    "envelope": "NDDEV-ANTIGRAVITY-CLI-BACKUP.json",
+    "slots": 10,
+    "canonical_target_bound": true
+  }
+}
