@@ -2,6 +2,11 @@
   "schema_version": 1,
   "verified_date": "2026-07-26",
   "verified_version_ref": "build/version.json:antigravity_cli_tested",
+  "release": {
+    "tag": "1.1.7",
+    "published_at": "2026-07-26T00:43:16Z",
+    "url": "https://github.com/google-antigravity/antigravity-cli/releases/tag/1.1.7"
+  },
   "runtime": {
     "product": "Antigravity CLI",
     "executable": "agy",

@@ -3,6 +3,8 @@
   "build_version": "0.1.0",
   "antigravity_cli_tested": "1.1.7",
   "antigravity_cli_min": "1.1.7",
+  "antigravity_cli_release_tag": "1.1.7",
+  "antigravity_cli_release_published_at": "2026-07-26T00:43:16Z",
   "python_requires": ">=3.10",
   "runtime_baseline_ref": "references/antigravity-cli-baseline.json"
 }

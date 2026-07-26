@@ -147,6 +147,16 @@ def main() -> int:
         elif builder.get("marketplace") is not None:
             errors.append("config/nddev-contract.json: marketplace must be null")
     if baseline is not None:
+        if version is not None:
+            release = baseline.get("release", {})
+            if release.get("tag") != version.get("antigravity_cli_release_tag"):
+                errors.append("references/antigravity-cli-baseline.json: release tag mismatch")
+            if release.get("published_at") != version.get(
+                "antigravity_cli_release_published_at"
+            ):
+                errors.append(
+                    "references/antigravity-cli-baseline.json: release timestamp mismatch"
+                )
         if baseline.get("configuration", {}).get("marketplace") is not None:
             errors.append("references/antigravity-cli-baseline.json: marketplace must be null")
         if baseline.get("runtime", {}).get("executable") != "agy":
