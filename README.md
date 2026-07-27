@@ -1,50 +1,87 @@
 # NDDev Antigravity CLI Setup Manager
 
-`nddev-antigravity-cli-app` installs and switches complete Antigravity CLI setup
-variants in an explicit isolated HOME target. It never defaults to the
-operator's live `~/.gemini/antigravity-cli`.
+`nddev-antigravity-cli-app` is a dependency-free public setup manager for
+Google Antigravity CLI. It writes one NDDev content setup and one orthogonal
+permission profile into an explicit isolated HOME target. It never defaults to
+the operator's live `~/.gemini` state.
 
-## Setups
+## Current model
 
-- `safe`: `toolPermission=strict`, artifact review required, sandbox enabled,
-  non-workspace access disabled.
-- `balanced`: `toolPermission=proceed-in-sandbox`, dynamic artifact review,
-  sandbox enabled, non-workspace access disabled.
-- `full-auto`: `toolPermission=always-proceed`, artifact writes allowed,
-  sandbox enabled, non-workspace access enabled.
+- Content setup: `nddev-builder`
+- Default permission profile: `full-auto`
+- Review-gated permission profile: `safe`
+- Managed command: `agy`
+- Managed target executable: `bin/agy`
 
-## Native Builder Projection
+Exact profile payloads are owned by `profiles/`. Exact runtime pins and source
+provenance are owned by `references/antigravity-cli-baseline.json`. Manager
+behavior is owned by `cli-tools/nddev_antigravity_cli.py`.
 
-Antigravity CLI documents plugins as bundles staged under
-`~/.gemini/antigravity-cli/plugins/<plugin_name>/`. This module projects
-`nddev-builder` onto that native plugin surface:
+## Native builder toolkit
 
-- `plugin.json`
-- `skills/nddev-builder/SKILL.md`
-- `agents/nddev-builder.md`
-- `rules/nddev-builder.md`
+The public `nddev-builder` setup is staged as a native Antigravity CLI plugin
+under the managed target:
 
-No marketplace format is declared because the official Antigravity CLI docs do
-not document one.
+```text
+~/.gemini/antigravity-cli/plugins/nddev-builder/
+```
+
+It installs a full public builder toolkit:
+
+- plugin manifest
+- routed entry Agent Skill
+- focused Agent Skills for configuration/profile, permissions/sandbox,
+  agents/subagents, instructions/skills/rules, plugins, hooks, MCP, lifecycle,
+  and validation
+- focused references for native paths, code-owned fact owners, and executable
+  public validation workflows
+- native Markdown builder agent
+- native builder rule
+
+The default setup does not install hooks, MCP servers, credentials, or a plugin
+marketplace.
 
 ## Usage
 
+List available content setups and profiles:
+
 ```bash
 python3 cli-tools/nddev_antigravity_cli.py list --json
-python3 cli-tools/nddev_antigravity_cli.py plan --setup safe --target /absolute/agy-home --json
-python3 cli-tools/nddev_antigravity_cli.py install --setup safe --target /absolute/agy-home --json
-python3 cli-tools/nddev_antigravity_cli.py switch --setup balanced --target /absolute/agy-home --json
-python3 cli-tools/nddev_antigravity_cli.py switch --setup full-auto --target /absolute/agy-home --json
+```
+
+Plan or install the default setup/profile:
+
+```bash
+python3 cli-tools/nddev_antigravity_cli.py plan --target /absolute/agy-home --json
+python3 cli-tools/nddev_antigravity_cli.py install --target /absolute/agy-home --json
+```
+
+Install or switch to the review-gated profile:
+
+```bash
+python3 cli-tools/nddev_antigravity_cli.py install --profile safe --target /absolute/agy-home --json
+python3 cli-tools/nddev_antigravity_cli.py switch --profile safe --target /absolute/agy-home --json
+```
+
+Inspect, migrate, restore, or remove managed state:
+
+```bash
+python3 cli-tools/nddev_antigravity_cli.py status --target /absolute/agy-home --json
+python3 cli-tools/nddev_antigravity_cli.py migrate --profile full-auto --target /absolute/agy-home --json
 python3 cli-tools/nddev_antigravity_cli.py restore --backup 0 --target /absolute/agy-home --json
 python3 cli-tools/nddev_antigravity_cli.py remove --target /absolute/agy-home --json
 ```
 
+Legacy managed targets are readable for status, migrate, restore, and remove.
+They cannot launch until migrated.
+
 ## Software lifecycle
 
 The setup lifecycle and CLI binary lifecycle are separate. `install-cli` and
-`update-cli` install the current `agy` binary into the explicit target from the
-pinned official GitHub release artifact for Antigravity CLI 1.1.7. The manager
-does not use npm or pip.
+`update-cli` install a target-owned `agy` binary from the official Antigravity
+install manifest pins recorded in `references/antigravity-cli-baseline.json`.
+The manager does not use npm, pip, shell-profile mutation, or the caller's live
+home directory.
 
 ```bash
 python3 cli-tools/nddev_antigravity_cli.py software-status --target /absolute/agy-home --json
@@ -52,42 +89,34 @@ python3 cli-tools/nddev_antigravity_cli.py install-cli --target /absolute/agy-ho
 python3 cli-tools/nddev_antigravity_cli.py update-cli --target /absolute/agy-home --json
 ```
 
-`install-cli` requires absent managed software. `update-cli` requires existing
-managed software and is an idempotent no-op when `software-status` reports
-`current=true`. The target-owned binary is written to `bin/agy` and mirrored
-under `.nddev-software/antigravity-cli/versions/1.1.7/`. Updates stage a full
-version tree and atomically swap it into place; rollback restores the version
-tree, `bin/agy`, and the software stamp.
+`software-status` is read-only and never executes `agy`.
 
-`software-status` reports both `installed` and `current`: `installed` means the
-target has a structurally complete binary plus matching stamp digest; `current`
-additionally requires the stamp to match this module's exact current version,
-official source URL, current platform asset, artifact SHA-256 and size pins, and
-build.
-
-Launch Antigravity CLI through the managed target:
+Launch through the managed target:
 
 ```bash
 python3 cli-tools/nddev_antigravity_cli.py launch --target /absolute/agy-home -- [agy args...]
 ```
 
-`launch` sets `HOME` to the managed target and places XDG directories under the
-same target for the child process. It requires `software-status` to report
-`installed=true` and `current=true`, executes only the absolute target-owned
-`bin/agy`, and never falls back to `PATH`. It validates the managed target while
-holding the target lock, releases the lock before starting the child process,
-and rejects documented Antigravity CLI flags that override managed sandbox,
-permission, execution-mode, or working-directory scope. Provider credential
-environment variables are not inherited.
+`launch` is the authentication boundary. It requires clean managed setup state,
+current target-owned software, the target-owned executable, and a filtered
+child environment.
+
+## Public validation
+
+Run from the module root:
+
+```bash
+python3 cli-tools/validate_public_contracts.py
+python3 -m py_compile cli-tools/nddev_antigravity_cli.py cli-tools/validate_public_contracts.py
+python3 cli-tools/nddev_antigravity_cli.py list --json
+```
+
+Use only temporary targets for local lifecycle smoke checks. Do not run against
+live Antigravity state.
 
 ## Ownership
 
-The manager owns only:
-
-- `toolPermission`, `artifactReviewPolicy`, `enableTerminalSandbox`, and
-  `allowNonWorkspaceAccess` in `.gemini/antigravity-cli/settings.json`
-- the `nddev-builder` plugin bundle
-- `NDDEV-ANTIGRAVITY-CLI-SETUP.json`
-
-Other settings keys, credentials, session logs, caches, and unrelated files are
-preserved.
+This public module owns runtime implementation, setup/profile payloads, public
+contracts, public documentation, and public release metadata. Private tests,
+benchmarks, memories, release evidence, root registry pins, and CI
+orchestration belong outside this repository.
