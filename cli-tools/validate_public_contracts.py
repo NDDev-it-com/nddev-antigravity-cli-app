@@ -798,12 +798,38 @@ def check_manager_constants(errors: list[str], build_version: str | None) -> Non
         ["plan", "--target", "/tmp/nddev-antigravity-cli"],
         ["install", "--profile", "safe", "--target", "/tmp/nddev-antigravity-cli"],
         ["migrate", "--target", "/tmp/nddev-antigravity-cli"],
-        ["launch", "--target", "/tmp/nddev-antigravity-cli", "--", "--help"],
     ):
         try:
             manager.parse_args(argv)
         except SystemExit as exc:
             errors.append(f"manager parse_args rejected {argv}: {exc}")
+    launch_target = "/tmp/nddev-antigravity-cli"
+    launch_parse_cases = (
+        (["launch", "--target", launch_target], []),
+        (["launch", "--target", launch_target, "--"], ["--"]),
+        (["launch", "--target", launch_target, "--", "--help"], ["--", "--help"]),
+        (
+            ["launch", "--target", launch_target, "--", "--", "--help"],
+            ["--", "--", "--help"],
+        ),
+    )
+    for argv, expected_child_args in launch_parse_cases:
+        try:
+            parsed = manager.parse_args(argv)
+        except SystemExit as exc:
+            errors.append(f"manager parse_args rejected {argv}: {exc}")
+            continue
+        if parsed.child_args != expected_child_args:
+            errors.append(
+                "manager launch separator parse mismatch for "
+                f"{argv}: {parsed.child_args!r}"
+            )
+    if manager.normalized_launch_child_args([]) != []:
+        errors.append("manager launch child arg normalization changed zero args")
+    if manager.normalized_launch_child_args(["--help", "--"]) != ["--help", "--"]:
+        errors.append("manager launch child arg normalization removed later separator")
+    if manager.normalized_launch_child_args(["--", "--", "--help"]) != ["--", "--help"]:
+        errors.append("manager launch child arg normalization removed more than one separator")
 
 
 def check_no_production_test_switches(errors: list[str]) -> None:
@@ -1321,6 +1347,60 @@ def check_launch_allowed_requires_software(errors: list[str], manager: Any) -> N
             manager.validate_launch_ready(target, [])
         except manager.ManagerError as exc:
             errors.append(f"launch with target-owned software rejected: {exc}")
+
+
+def check_launch_separator_stripping(errors: list[str], manager: Any) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = manager.resolve_target(str(root / "launch-separator-target"))
+        capture = root / "launch-argv.json"
+        script = (
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            f"capture = Path({str(capture)!r})\n"
+            "capture.write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n"
+            "raise SystemExit(0)\n"
+        ).encode("utf-8")
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        install_fake_current_software(manager, target, script)
+        launch_cases = (
+            ("zero child args", manager.parse_args(["launch", "--target", str(target)]).child_args, []),
+            (
+                "single separator",
+                manager.parse_args(["launch", "--target", str(target), "--", "--help"]).child_args,
+                ["--help"],
+            ),
+            (
+                "repeated separator",
+                manager.parse_args(
+                    ["launch", "--target", str(target), "--", "--", "--help"]
+                ).child_args,
+                ["--", "--help"],
+            ),
+            ("direct API separator", ["--", "literal"], ["literal"]),
+        )
+        for label, child_args, expected in launch_cases:
+            with contextlib.suppress(FileNotFoundError):
+                capture.unlink()
+            exit_code = manager.launch(target, child_args)
+            if exit_code != 0:
+                errors.append(f"launch separator {label}: launch returned {exit_code}")
+                continue
+            if not capture.is_file():
+                errors.append(f"launch separator {label}: argv capture missing")
+                continue
+            observed = json.loads(capture.read_text(encoding="utf-8"))
+            if observed != expected:
+                errors.append(
+                    f"launch separator {label}: child argv mismatch: {observed!r}"
+                )
 
 
 def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any) -> None:
@@ -1925,6 +2005,7 @@ def check_adversarial_smokes_with_manager(errors: list[str], manager: Any) -> No
     check_restore_rejects_malformed_legacy_backup(errors, manager)
     check_malformed_legacy_stamp_errors(errors, manager)
     check_launch_allowed_requires_software(errors, manager)
+    check_launch_separator_stripping(errors, manager)
     check_launch_lock_blocks_lifecycle_mutations(errors, manager)
     check_external_lock_blocks_internal_lock_rename(errors, manager)
     check_external_lock_three_process_handover(errors, manager)

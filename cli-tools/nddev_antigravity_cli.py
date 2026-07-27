@@ -2445,14 +2445,19 @@ def build_launch_env(target: Path) -> dict[str, str]:
 
 def validate_launch_args(child_args: list[str]) -> None:
     for argument in child_args:
-        if argument == "--":
-            continue
         for option in MANAGED_LAUNCH_OPTION_NAMES:
             if argument == option or argument.startswith(f"{option}="):
                 fail(
                     "launch argument overrides managed Antigravity CLI setup scope: "
                     f"{argument}"
                 )
+
+
+def normalized_launch_child_args(child_args: list[str]) -> list[str]:
+    args = list(child_args)
+    if args and args[0] == "--":
+        return args[1:]
+    return args
 
 
 def launch_handoff_directories(target: Path) -> tuple[Path, ...]:
@@ -2533,7 +2538,7 @@ def recheck_launch_executable(target: Path, stamp: dict[str, Any]) -> Path:
 
 
 def launch_ready_stamp_unlocked(target: Path, child_args: list[str]) -> dict[str, Any]:
-    validate_launch_args(child_args)
+    validate_launch_args(normalized_launch_child_args(child_args))
     require_clean_current(target)
     status = software_status(target)
     if not status["installed"] or not status["current"]:
@@ -2555,6 +2560,7 @@ def validate_launch_ready(target: Path, child_args: list[str]) -> Path:
 
 
 def launch(target: Path, child_args: list[str]) -> int:
+    child_args = normalized_launch_child_args(child_args)
     with target_lock(target, create=False) as target:
         stamp = launch_ready_stamp_unlocked(target, child_args)
         env = build_launch_env(target)
@@ -2661,10 +2667,7 @@ def main(argv: list[str] | None = None) -> int:
             emit(remove_setup(resolve_target(args.target)), as_json=args.json)
             return 0
         if args.command == "launch":
-            child_args = list(args.child_args)
-            if child_args and child_args[0] == "--":
-                child_args = child_args[1:]
-            return launch(resolve_target(args.target), child_args)
+            return launch(resolve_target(args.target), list(args.child_args))
         fail(f"unsupported command: {args.command}")
     except ManagerError as exc:
         if wants_json(raw_argv):
