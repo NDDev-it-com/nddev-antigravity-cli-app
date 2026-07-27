@@ -12,11 +12,13 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
+PRODUCT_NAME = "nddev-antigravity-cli-app"
 CLI_VERSION = "1.1.7"
 SETUP_IDS = ["nddev-builder"]
 PROFILE_IDS = ["full-auto", "safe"]
@@ -99,6 +101,45 @@ WORKFLOWS = [
     "secret-scan.yml",
     "zizmor.yml",
 ]
+RELEASE_WORKFLOW = ".github/workflows/release.yml"
+RELEASE_SUPPLY_CHAIN_CALLER = (
+    "NDDev-it-com/ci-workflows/.github/workflows/release-supply-chain.yml"
+    "@2ccb80e96f5771b6a6b4eae63a4f47e232906dc7"
+)
+RELEASE_SUPPLY_CHAIN_VERSION_COMMENT = "0.12.0"
+RELEASE_JOB_PERMISSIONS = {
+    "attestations": "write",
+    "artifact-metadata": "write",
+    "contents": "write",
+    "id-token": "write",
+}
+REQUIRED_ARCHIVE_PATHS = {
+    "README.md",
+    "LICENSE",
+    "VERSION",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "AGENTS.md",
+    ".gitignore",
+    ".gds",
+    ".github",
+    "build",
+    "cli-tools",
+    "config",
+    "docs",
+    "references",
+    "profiles",
+    "setups",
+}
+BASE_RUNTIME_PATHS = {
+    "README.md",
+    "LICENSE",
+    "VERSION",
+    "build",
+    "cli-tools",
+    "config",
+    "references",
+}
 
 
 def load_json(relative: str, errors: list[str]) -> dict[str, Any] | None:
@@ -132,6 +173,187 @@ def read_text(relative: str, errors: list[str]) -> str | None:
     if "\r" in text:
         errors.append(f"{relative}: must use LF line endings")
     return text
+
+
+def tracked_files(errors: list[str]) -> set[str]:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        errors.append(f"git ls-files failed: {result.stderr.strip()}")
+        return set()
+    return {line for line in result.stdout.splitlines() if line}
+
+
+def is_normalized_release_path(value: str) -> bool:
+    if not value or "\\" in value or any(ord(character) < 32 for character in value):
+        return False
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and "." not in path.parts
+        and ".." not in path.parts
+        and str(path) == value
+    )
+
+
+def declared_path_is_tracked(value: str, tracked: set[str]) -> bool:
+    path = ROOT / value
+    if not path.exists():
+        return False
+    if path.is_file():
+        return value in tracked
+    if path.is_dir():
+        prefix = f"{value}/"
+        return any(item.startswith(prefix) for item in tracked)
+    return False
+
+
+def path_covered_by_tokens(value: str, tokens: set[str]) -> bool:
+    path = PurePosixPath(value)
+    for token in tokens:
+        container = PurePosixPath(token)
+        if path == container:
+            return True
+        try:
+            path.relative_to(container)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def workflow_scalar(text: str, key: str) -> str | None:
+    matches = re.findall(rf"(?m)^      {re.escape(key)}:\s+(.+?)\s*$", text)
+    return matches[0] if len(matches) == 1 else None
+
+
+def workflow_block_tokens(text: str, key: str, errors: list[str]) -> set[str]:
+    lines = text.splitlines()
+    tokens: list[str] = []
+    for index, line in enumerate(lines):
+        if line == f"      {key}: >-":
+            for following in lines[index + 1 :]:
+                if following and not following.startswith("        "):
+                    break
+                tokens.extend(following.split())
+            break
+    else:
+        errors.append(f"{RELEASE_WORKFLOW}: missing block input {key}")
+    duplicates = sorted({token for token in tokens if tokens.count(token) > 1})
+    if duplicates:
+        errors.append(f"{RELEASE_WORKFLOW}: duplicate {key} paths: {duplicates}")
+    for token in tokens:
+        if not is_normalized_release_path(token):
+            errors.append(f"{RELEASE_WORKFLOW}: invalid {key} path token: {token}")
+    return set(tokens)
+
+
+def job_permissions(text: str) -> dict[str, str] | None:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line == "    permissions:":
+            permissions: dict[str, str] = {}
+            for following in lines[index + 1 :]:
+                if following and not following.startswith("      "):
+                    break
+                if not following.strip():
+                    continue
+                match = re.fullmatch(r"      ([A-Za-z0-9_-]+): (read|write|none)", following)
+                if match is None:
+                    return None
+                permissions[match.group(1)] = match.group(2)
+            return permissions
+    return None
+
+
+def release_runtime_required_paths(
+    manifest: dict[str, Any] | None,
+    contract: dict[str, Any] | None,
+) -> set[str]:
+    required = set(BASE_RUNTIME_PATHS)
+    if isinstance(manifest, dict):
+        source_roots = manifest.get("source_roots")
+        if isinstance(source_roots, dict):
+            for value in source_roots.values():
+                if isinstance(value, str) and value:
+                    required.add(value)
+    if isinstance(contract, dict):
+        setup_system = contract.get("setup_system")
+        if isinstance(setup_system, dict):
+            for key in ("catalog_root", "profile_root"):
+                value = setup_system.get(key)
+                if isinstance(value, str) and value:
+                    required.add(value)
+        for key in ("manifest_ref", "version_ref"):
+            value = contract.get(key)
+            if isinstance(value, str) and "/" in value:
+                required.add(value.split("/", 1)[0])
+        runtime = contract.get("runtime_compatibility")
+        if isinstance(runtime, dict):
+            baseline_ref = runtime.get("baseline_ref")
+            if isinstance(baseline_ref, str) and "/" in baseline_ref:
+                required.add(baseline_ref.split("/", 1)[0])
+    return required
+
+
+def check_release_workflow(
+    errors: list[str],
+    manifest: dict[str, Any] | None,
+    contract: dict[str, Any] | None,
+) -> None:
+    text = read_text(RELEASE_WORKFLOW, errors)
+    if text is None:
+        return
+    tracked = tracked_files(errors)
+    if not tracked:
+        return
+
+    uses = re.findall(r"(?m)^    uses:\s+(\S+)(?:\s+#\s*(\S+))?\s*$", text)
+    if uses != [(RELEASE_SUPPLY_CHAIN_CALLER, RELEASE_SUPPLY_CHAIN_VERSION_COMMENT)]:
+        errors.append(f"{RELEASE_WORKFLOW}: reusable release caller pin mismatch")
+    if re.search(r"(?m)^permissions:\s+\{\}\s*$", text) is None:
+        errors.append(f"{RELEASE_WORKFLOW}: top-level permissions must be empty")
+    if job_permissions(text) != RELEASE_JOB_PERMISSIONS:
+        errors.append(f"{RELEASE_WORKFLOW}: publish job permissions mismatch")
+    if workflow_scalar(text, "version") != "${{ github.ref_name }}":
+        errors.append(f"{RELEASE_WORKFLOW}: release version input mismatch")
+    if workflow_scalar(text, "package_name") != PRODUCT_NAME:
+        errors.append(f"{RELEASE_WORKFLOW}: package_name input mismatch")
+
+    archive_paths = workflow_block_tokens(text, "archive_paths", errors)
+    runtime_paths = workflow_block_tokens(text, "runtime_paths", errors)
+    missing_archive = sorted(REQUIRED_ARCHIVE_PATHS - archive_paths)
+    if missing_archive:
+        errors.append(f"{RELEASE_WORKFLOW}: archive_paths missing {missing_archive}")
+    required_runtime = release_runtime_required_paths(manifest, contract)
+    missing_runtime = sorted(
+        path for path in required_runtime if not path_covered_by_tokens(path, runtime_paths)
+    )
+    if missing_runtime:
+        errors.append(f"{RELEASE_WORKFLOW}: runtime_paths missing {missing_runtime}")
+    for token_set_name, token_set in (
+        ("archive_paths", archive_paths),
+        ("runtime_paths", runtime_paths),
+    ):
+        for token in sorted(token_set):
+            if not declared_path_is_tracked(token, tracked):
+                errors.append(f"{RELEASE_WORKFLOW}: {token_set_name} path is not tracked: {token}")
+    for token in sorted(runtime_paths):
+        if not path_covered_by_tokens(token, archive_paths):
+            errors.append(f"{RELEASE_WORKFLOW}: runtime path is outside archive: {token}")
+    tracked_docs = {
+        path
+        for path in tracked
+        if path.endswith(".md") or path.startswith("docs/")
+    }
+    for path in sorted(tracked_docs):
+        if not path_covered_by_tokens(path, archive_paths):
+            errors.append(f"{RELEASE_WORKFLOW}: tracked documentation not archived: {path}")
 
 
 def read_build_version(errors: list[str]) -> str | None:
@@ -408,6 +630,7 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
         read_text(relative, errors)
     for workflow in WORKFLOWS:
         read_text(f".github/workflows/{workflow}", errors)
+    check_release_workflow(errors, manifest, contract)
 
 
 def check_manager_constants(errors: list[str], build_version: str | None) -> None:
