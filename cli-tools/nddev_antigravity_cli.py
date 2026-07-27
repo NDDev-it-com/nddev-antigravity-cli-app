@@ -393,9 +393,30 @@ def read_json_file(path: Path, label: str, *, owner_only: bool = False) -> dict[
     return parse_json_object(content, label)
 
 
-def validate_id(value: str, label: str) -> None:
+def validate_non_empty_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        fail(f"{label} must be a non-empty string")
+    return value
+
+
+def validate_exact_int(value: Any, label: str) -> int:
+    if type(value) is not int:
+        fail(f"{label} must be an integer")
+    return value
+
+
+def validate_sha256_digest(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value):
+        fail(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def validate_id(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        fail(f"{label} must be a string")
     if not SETUP_ID_PATTERN.fullmatch(value):
         fail(f"invalid {label}: {value!r}")
+    return value
 
 
 def expected_settings_for_profile(profile_id: str) -> dict[str, Any]:
@@ -746,11 +767,12 @@ def stamp_payload(
     setup_id: str,
     profile_id: str,
     desired: dict[str, bytes | None],
+    build_version: str = VERSION,
 ) -> dict[str, Any]:
     return {
         "schema_version": STAMP_SCHEMA,
         "product_name": PRODUCT_NAME,
-        "build_version": VERSION,
+        "build_version": build_version,
         "setup_id": setup_id,
         "profile_id": profile_id,
         "canonical_target": str(target),
@@ -821,12 +843,13 @@ def validate_current_stamp(stamp: dict[str, Any], target: Path) -> None:
         or stamp["canonical_target"] != str(target)
     ):
         fail("managed stamp identity or schema is invalid")
-    if stamp["setup_id"] not in SETUP_IDS:
+    setup_id = validate_id(stamp["setup_id"], "managed stamp setup_id")
+    if setup_id not in SETUP_IDS:
         fail("managed stamp setup_id is not supported by this build")
-    if stamp["profile_id"] not in PROFILE_IDS:
+    profile_id = validate_id(stamp["profile_id"], "managed stamp profile_id")
+    if profile_id not in PROFILE_IDS:
         fail("managed stamp profile_id is not supported by this build")
-    if not isinstance(stamp["build_version"], str) or not stamp["build_version"]:
-        fail("managed stamp build_version must be a non-empty string")
+    validate_non_empty_string(stamp["build_version"], "managed stamp build_version")
     validate_digest_map(stamp["managed_files"], "managed stamp managed_files", MANAGED_FILES)
     builder = stamp["builder"]
     if not isinstance(builder, dict) or builder.get("projection") != "native-plugin":
@@ -846,10 +869,10 @@ def validate_legacy_stamp(stamp: dict[str, Any], target: Path) -> None:
         or stamp["canonical_target"] != str(target)
     ):
         fail("legacy managed stamp identity or schema is invalid")
-    if stamp["setup_id"] not in LEGACY_SETUP_IDS:
+    setup_id = validate_id(stamp["setup_id"], "legacy managed stamp setup_id")
+    if setup_id not in LEGACY_SETUP_IDS:
         fail("legacy managed stamp setup_id is not recognized")
-    if not isinstance(stamp["build_version"], str) or not stamp["build_version"]:
-        fail("legacy managed stamp build_version must be a non-empty string")
+    validate_non_empty_string(stamp["build_version"], "legacy managed stamp build_version")
     validate_digest_map(
         stamp["managed_files"],
         "legacy managed stamp managed_files",
@@ -1683,6 +1706,41 @@ def read_backup_files(
     return result
 
 
+def validate_common_backup_envelope(
+    envelope: dict[str, Any],
+    target: Path,
+    slot: int,
+    schema: int,
+) -> str:
+    if validate_exact_int(envelope["schema_version"], "backup schema_version") != schema:
+        fail("backup envelope schema is invalid")
+    if validate_non_empty_string(envelope["product_name"], "backup product_name") != PRODUCT_NAME:
+        fail("backup envelope product identity is invalid")
+    build_version = validate_non_empty_string(envelope["build_version"], "backup build_version")
+    if validate_exact_int(envelope["slot"], "backup slot") != slot:
+        fail("backup slot identity is invalid")
+    if validate_non_empty_string(envelope["canonical_target"], "backup canonical_target") != str(target):
+        fail("backup belongs to a different canonical target")
+    validate_sha256_digest(envelope["stamp_sha256"], "backup stamp_sha256")
+    return build_version
+
+
+def validate_restored_stamp_bytes(
+    target: Path,
+    stamp: dict[str, Any],
+    expected_sha256: str,
+) -> bytes:
+    content = canonical_json(stamp)
+    if sha256_bytes(content) != expected_sha256:
+        fail("backup stamp digest mismatch")
+    parsed = parse_json_object(content, "restored backup stamp")
+    if is_legacy_stamp(parsed):
+        validate_legacy_stamp(parsed, target)
+    else:
+        validate_current_stamp(parsed, target)
+    return content
+
+
 def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[str, bytes | None]]:
     require_private_target(target)
     if slot < 0 or slot >= MAX_BACKUPS:
@@ -1697,10 +1755,14 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[str, byte
     if envelope.get("schema_version") == LEGACY_BACKUP_SCHEMA:
         if set(envelope) != LEGACY_BACKUP_KEYS:
             fail("legacy backup envelope has invalid keys")
-        if envelope["product_name"] != PRODUCT_NAME or envelope["canonical_target"] != str(target):
-            fail("legacy backup envelope identity is invalid")
-        validate_id(envelope["source_setup_id"], "legacy backup setup id")
-        if envelope["source_setup_id"] not in LEGACY_SETUP_IDS:
+        source_build_version = validate_common_backup_envelope(
+            envelope,
+            target,
+            slot,
+            LEGACY_BACKUP_SCHEMA,
+        )
+        source_setup_id = validate_id(envelope["source_setup_id"], "legacy backup setup id")
+        if source_setup_id not in LEGACY_SETUP_IDS:
             fail("legacy backup setup id is not recognized")
         managed = validate_digest_map(
             envelope["managed_files"],
@@ -1708,41 +1770,57 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[str, byte
             LEGACY_MANAGED_FILES,
         )
         files = read_backup_files(slot_dir, managed, LEGACY_MANAGED_FILES)
-        files[STAMP_NAME] = canonical_json(
-            legacy_stamp_payload(target, envelope["source_setup_id"], envelope["build_version"], files)
+        files[STAMP_NAME] = validate_restored_stamp_bytes(
+            target,
+            legacy_stamp_payload(target, source_setup_id, source_build_version, files),
+            envelope["stamp_sha256"],
         )
         return envelope, files
     if set(envelope) != BACKUP_KEYS:
         fail("backup envelope has invalid keys")
-    if envelope["schema_version"] != BACKUP_SCHEMA or envelope["product_name"] != PRODUCT_NAME:
-        fail("backup envelope identity or schema is invalid")
-    if envelope["canonical_target"] != str(target):
-        fail("backup belongs to a different canonical target")
-    source_schema = envelope["source_stamp_schema"]
+    validate_common_backup_envelope(envelope, target, slot, BACKUP_SCHEMA)
+    source_schema = validate_exact_int(
+        envelope["source_stamp_schema"],
+        "backup source_stamp_schema",
+    )
+    source_build_version = validate_non_empty_string(
+        envelope["source_build_version"],
+        "backup source_build_version",
+    )
+    source_setup_id = validate_id(envelope["source_setup_id"], "backup source_setup_id")
     if source_schema == LEGACY_STAMP_SCHEMA:
         source_files = LEGACY_MANAGED_FILES
-        if envelope["source_setup_id"] not in LEGACY_SETUP_IDS or envelope["source_profile_id"] is not None:
+        source_profile_id = None
+        if source_setup_id not in LEGACY_SETUP_IDS or envelope["source_profile_id"] is not None:
             fail("backup legacy source identity is invalid")
     elif source_schema == STAMP_SCHEMA:
         source_files = MANAGED_FILES
-        if envelope["source_setup_id"] not in SETUP_IDS or envelope["source_profile_id"] not in PROFILE_IDS:
+        source_profile_id = validate_id(
+            envelope["source_profile_id"],
+            "backup source_profile_id",
+        )
+        if source_setup_id not in SETUP_IDS or source_profile_id not in PROFILE_IDS:
             fail("backup current source identity is invalid")
     else:
         fail("backup source stamp schema is unsupported")
     managed = validate_digest_map(envelope["managed_files"], "backup managed_files", source_files)
     files = read_backup_files(slot_dir, managed, source_files)
     if source_schema == LEGACY_STAMP_SCHEMA:
-        files[STAMP_NAME] = canonical_json(
+        files[STAMP_NAME] = validate_restored_stamp_bytes(
+            target,
             legacy_stamp_payload(
                 target,
-                envelope["source_setup_id"],
-                envelope["source_build_version"],
+                source_setup_id,
+                source_build_version,
                 files,
-            )
+            ),
+            envelope["stamp_sha256"],
         )
     else:
-        files[STAMP_NAME] = canonical_json(
-            stamp_payload(target, envelope["source_setup_id"], envelope["source_profile_id"], files)
+        files[STAMP_NAME] = validate_restored_stamp_bytes(
+            target,
+            stamp_payload(target, source_setup_id, source_profile_id, files, source_build_version),
+            envelope["stamp_sha256"],
         )
     return envelope, files
 
@@ -1775,6 +1853,10 @@ def current_status(target: Path) -> dict[str, Any]:
     drift = detect_drift(target, stamp)
     legacy = is_legacy_stamp(stamp)
     builder_files = LEGACY_BUILDER_MANAGED_FILES if legacy else BUILDER_MANAGED_FILES
+    launch_allowed = False
+    if not legacy and not drift:
+        software = software_status(target)
+        launch_allowed = software["installed"] and software["current"]
     return {
         "state": "legacy-managed" if legacy else "managed",
         "target": str(target),
@@ -1782,7 +1864,7 @@ def current_status(target: Path) -> dict[str, Any]:
         "profile_id": None if legacy else stamp["profile_id"],
         "build_version": stamp["build_version"],
         "legacy": legacy,
-        "launch_allowed": not legacy and not drift,
+        "launch_allowed": launch_allowed,
         "drift": drift,
         "builder": {
             "projection": "native-plugin",
@@ -1919,11 +2001,15 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         before = snapshot_managed_files(target)
         try:
             replace_managed_state(target, files, before)
+            restored_stamp = load_stamp(target)
+            if restored_stamp is None:
+                fail("restore did not produce a managed stamp")
+            restored_drift = detect_drift(target, restored_stamp)
+            if restored_drift:
+                fail(f"restored backup has drift: {restored_drift}")
         except BaseException:
             restore_snapshot(target, before)
             raise
-        restored_stamp = load_stamp(target)
-        assert restored_stamp is not None
         return {
             "operation": "restore",
             "target": str(target),

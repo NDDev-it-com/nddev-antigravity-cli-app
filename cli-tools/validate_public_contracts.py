@@ -504,6 +504,181 @@ def install_fake_current_software(manager: Any, target: Path, script: bytes) -> 
     )
 
 
+def snapshot_target_regular_files(target: Path) -> dict[str, bytes]:
+    result: dict[str, bytes] = {}
+    for path in sorted(target.rglob("*")):
+        relative = str(path.relative_to(target))
+        if path.is_symlink():
+            result[relative] = b"<symlink>"
+            continue
+        if path.is_file():
+            result[relative] = path.read_bytes()
+    return result
+
+
+def snapshot_managed_files(manager: Any, target: Path) -> dict[str, bytes | None]:
+    result: dict[str, bytes | None] = {}
+    for relative in (*manager.MANAGED_FILES, manager.STAMP_NAME):
+        if manager.target_file_exists(target, relative):
+            result[relative] = manager.read_target_file(target, relative, owner_only=False)
+        else:
+            result[relative] = None
+    return result
+
+
+def require_status_clean(errors: list[str], label: str, manager: Any, target: Path) -> None:
+    status = manager.current_status(target)
+    if status.get("state") != "managed" or status.get("drift") != []:
+        errors.append(f"{label}: target status is not clean: {status}")
+
+
+def write_legacy_backup_envelope(
+    manager: Any,
+    target: Path,
+    *,
+    build_version: Any,
+    stamp_sha256: Any,
+) -> None:
+    pool = manager.backup_pool(target)
+    slot_dir = pool / "0"
+    files_dir = slot_dir / "files"
+    pool.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(pool, 0o700)
+    slot_dir.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(slot_dir, 0o700)
+    files_dir.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(files_dir, 0o700)
+    envelope = {
+        "schema_version": manager.LEGACY_BACKUP_SCHEMA,
+        "product_name": manager.PRODUCT_NAME,
+        "build_version": build_version,
+        "slot": 0,
+        "canonical_target": str(target),
+        "source_setup_id": "safe",
+        "managed_files": {relative: None for relative in manager.LEGACY_MANAGED_FILES},
+        "stamp_sha256": stamp_sha256,
+    }
+    manager.atomic_write(slot_dir / manager.BACKUP_NAME, manager.canonical_json(envelope))
+
+
+def check_restore_rejects_malformed_legacy_backup(errors: list[str], manager: Any) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "malformed-legacy-backup-target"
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        clean_managed = snapshot_managed_files(manager, target)
+        require_status_clean(errors, "malformed legacy backup precheck", manager, target)
+        for build_version, stamp_sha256 in (
+            (["not", "a", "scalar"], "0" * 64),
+            (manager.VERSION, "not-a-sha256"),
+        ):
+            write_legacy_backup_envelope(
+                manager,
+                target,
+                build_version=build_version,
+                stamp_sha256=stamp_sha256,
+            )
+            before_all = snapshot_target_regular_files(target)
+            expect_manager_error(
+                errors,
+                "malformed legacy backup restore",
+                manager,
+                lambda: manager.restore_backup(target, 0),
+            )
+            if snapshot_target_regular_files(target) != before_all:
+                errors.append("malformed legacy backup restore: target bytes changed")
+            if snapshot_managed_files(manager, target) != clean_managed:
+                errors.append("malformed legacy backup restore: managed bytes changed")
+            require_status_clean(errors, "malformed legacy backup postcheck", manager, target)
+
+
+def check_malformed_legacy_stamp_errors(errors: list[str], manager: Any) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "malformed-legacy-stamp-target"
+        target.mkdir(mode=0o700)
+        os.chmod(target, 0o700)
+        stamp = {
+            "schema_version": manager.LEGACY_STAMP_SCHEMA,
+            "product_name": manager.PRODUCT_NAME,
+            "build_version": manager.VERSION,
+            "setup_id": ["safe"],
+            "canonical_target": str(target),
+            "managed_files": {relative: None for relative in manager.LEGACY_MANAGED_FILES},
+            "builder": {
+                "projection": "native-plugin",
+                "enabled": True,
+                "marketplace": None,
+                "files": list(manager.LEGACY_BUILDER_MANAGED_FILES),
+            },
+        }
+        manager.atomic_write(target / manager.STAMP_NAME, manager.canonical_json(stamp))
+        expect_manager_error(
+            errors,
+            "malformed legacy stamp setup_id list",
+            manager,
+            lambda: manager.current_status(target),
+        )
+        launched = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "cli-tools/nddev_antigravity_cli.py"),
+                "status",
+                "--target",
+                str(target),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        combined = launched.stdout + launched.stderr
+        if launched.returncode == 0:
+            errors.append("malformed legacy stamp CLI: expected non-zero exit")
+        if "Traceback" in combined or "TypeError" in combined:
+            errors.append("malformed legacy stamp CLI: traceback leaked")
+
+
+def check_launch_allowed_requires_software(errors: list[str], manager: Any) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "launch-allowed-target"
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        status = manager.current_status(target)
+        if status.get("drift") != []:
+            errors.append(f"launch_allowed without software: unexpected drift: {status}")
+        if status.get("launch_allowed") is not False:
+            errors.append("launch_allowed without software: expected false")
+        expect_manager_error(
+            errors,
+            "launch without target-owned software",
+            manager,
+            lambda: manager.validate_launch_ready(target, []),
+        )
+        install_fake_current_software(
+            manager,
+            target,
+            b"#!/bin/sh\nexit 0\n",
+        )
+        status = manager.current_status(target)
+        if status.get("launch_allowed") is not True:
+            errors.append(f"launch_allowed with target-owned software: expected true: {status}")
+        try:
+            manager.validate_launch_ready(target, [])
+        except manager.ManagerError as exc:
+            errors.append(f"launch with target-owned software rejected: {exc}")
+
+
 def check_adversarial_smokes(errors: list[str]) -> None:
     manager = import_manager(errors)
     if manager is None:
@@ -696,6 +871,10 @@ def check_adversarial_smokes(errors: list[str]) -> None:
             errors.append(f"fake PATH launch env: fake agy failed: {launched.stderr}")
         if str(fake_path) in launched.stdout:
             errors.append("fake PATH launch env: child observed attacker PATH")
+
+    check_restore_rejects_malformed_legacy_backup(errors, manager)
+    check_malformed_legacy_stamp_errors(errors, manager)
+    check_launch_allowed_requires_software(errors, manager)
 
 
 def check_no_current_forbidden_surfaces(errors: list[str]) -> None:
