@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -304,6 +305,13 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
         launch = manifest.get("runtime_launch", {})
         if launch.get("managed_override_args_blocked") != MANAGED_LAUNCH_OPTION_NAMES:
             errors.append("build/manifest.json: launch override policy mismatch")
+        for key in (
+            "target_lock_held_through_child",
+            "immediate_executable_digest_recheck",
+            "lifecycle_mutations_blocked_while_child_runs",
+        ):
+            if launch.get(key) is not True:
+                errors.append(f"build/manifest.json: runtime_launch.{key} must be true")
         software = manifest.get("software_install", {})
         if software.get("mechanism") != "official-antigravity-install-manifest":
             errors.append("build/manifest.json: software mechanism mismatch")
@@ -340,6 +348,16 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             errors.append("config/nddev-contract.json: legacy launch denial required")
         if contract.get("builder", {}).get("marketplace") is not None:
             errors.append("config/nddev-contract.json: builder marketplace must be null")
+        launch = contract.get("runtime_launch", {})
+        if launch.get("direct_command") is not None:
+            errors.append("config/nddev-contract.json: runtime_launch.direct_command must be null")
+        for key in (
+            "target_lock_held_through_child",
+            "immediate_executable_digest_recheck",
+            "lifecycle_mutations_blocked_while_child_runs",
+        ):
+            if launch.get(key) is not True:
+                errors.append(f"config/nddev-contract.json: runtime_launch.{key} must be true")
         safety = contract.get("safety", {})
         if safety.get("target_lock") != ".nddev-antigravity-cli-lock":
             errors.append("config/nddev-contract.json: target lock must be target-internal")
@@ -502,6 +520,24 @@ def install_fake_current_software(manager: Any, target: Path, script: bytes) -> 
         manager.software_stamp_path(target),
         manager.canonical_json(manager.software_stamp(target, artifact)),
     )
+
+
+def shell_single_quote(value: Path) -> str:
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
+
+def wait_for_file(path: Path, process: subprocess.Popen[str], errors: list[str], label: str) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        exit_code = process.poll()
+        if exit_code is not None:
+            errors.append(f"{label}: child exited before readiness marker: {exit_code}")
+            return False
+        time.sleep(0.05)
+    errors.append(f"{label}: readiness marker timed out")
+    return False
 
 
 def snapshot_target_regular_files(target: Path) -> dict[str, bytes]:
@@ -677,6 +713,78 @@ def check_launch_allowed_requires_software(errors: list[str], manager: Any) -> N
             manager.validate_launch_ready(target, [])
         except manager.ManagerError as exc:
             errors.append(f"launch with target-owned software rejected: {exc}")
+
+
+def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = manager.resolve_target(str(root / "launch-lock-target"))
+        ready = root / "child-ready"
+        stop = root / "child-stop"
+        script = (
+            "#!/bin/sh\n"
+            f"printf '%s\\n' ready > {shell_single_quote(ready)}\n"
+            f"while [ ! -f {shell_single_quote(stop)} ]; do sleep 0.05; done\n"
+            "exit 0\n"
+        ).encode("utf-8")
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        install_fake_current_software(manager, target, script)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(ROOT / "cli-tools/nddev_antigravity_cli.py"),
+                "launch",
+                "--target",
+                str(target),
+                "--",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            if not wait_for_file(ready, process, errors, "launch lock concurrency"):
+                return
+            if not (target / ".nddev-antigravity-cli-lock").is_dir():
+                errors.append("launch lock concurrency: target lock missing while child runs")
+            expect_manager_error(
+                errors,
+                "launch lock concurrency mutation",
+                manager,
+                lambda: manager.mutate_setup(
+                    target,
+                    manager.DEFAULT_SETUP_ID,
+                    "safe",
+                    "switch",
+                ),
+            )
+            stop.write_text("stop\n", encoding="utf-8")
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate(timeout=5)
+                errors.append("launch lock concurrency: child did not exit after stop marker")
+            if process.returncode != 0:
+                errors.append(
+                    "launch lock concurrency: launch returned "
+                    f"{process.returncode}: {stdout}{stderr}"
+                )
+            if (target / ".nddev-antigravity-cli-lock").exists():
+                errors.append("launch lock concurrency: target lock was not cleaned up")
+        finally:
+            if process.poll() is None:
+                stop.write_text("stop\n", encoding="utf-8")
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=5)
 
 
 def check_adversarial_smokes(errors: list[str]) -> None:
@@ -875,6 +983,7 @@ def check_adversarial_smokes(errors: list[str]) -> None:
     check_restore_rejects_malformed_legacy_backup(errors, manager)
     check_malformed_legacy_stamp_errors(errors, manager)
     check_launch_allowed_requires_software(errors, manager)
+    check_launch_lock_blocks_lifecycle_mutations(errors, manager)
 
 
 def check_no_current_forbidden_surfaces(errors: list[str]) -> None:

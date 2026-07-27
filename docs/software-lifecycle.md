@@ -45,10 +45,14 @@ pool, and backup slot paths.
 
 ## Launch safety
 
-`launch` validates the managed setup and target-owned `bin/agy` while holding
-the target lock, releases the lock before starting the child process, and never
-executes a binary from `PATH`. It rejects Antigravity CLI override flags that
-would replace the managed sandbox, permission, execution-mode, custom-agent, or
-working-directory scope for the session.
+`launch` holds the target-internal lifecycle lock from preflight through child
+process completion. While holding that lock, it validates the managed setup,
+requires current target-owned software, immediately rechecks the target-owned
+`bin/agy` and version-tree binary digests, builds the filtered child
+environment, and executes only the absolute target-owned `bin/agy` path. Other
+lifecycle mutations fail while the launched child is running. It rejects
+Antigravity CLI override flags that would replace the managed sandbox,
+permission, execution-mode, custom-agent, or working-directory scope for the
+session.
 
 Legacy managed targets are launch-denied until migrated.

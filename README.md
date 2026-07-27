@@ -97,9 +97,10 @@ Launch through the managed target:
 python3 cli-tools/nddev_antigravity_cli.py launch --target /absolute/agy-home -- [agy args...]
 ```
 
-`launch` is the authentication boundary. It requires clean managed setup state,
-current target-owned software, the target-owned executable, and a filtered
-child environment.
+`launch` is the authentication boundary. It holds the target lifecycle lock
+through child process completion, requires clean managed setup state, current
+target-owned software, immediate executable digest recheck, the absolute
+target-owned executable, and a filtered child environment.
 
 ## Public validation
 

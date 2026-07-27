@@ -2098,23 +2098,64 @@ def validate_launch_args(child_args: list[str]) -> None:
                 )
 
 
-def validate_launch_ready(target: Path, child_args: list[str]) -> Path:
+def recheck_launch_executable(target: Path, stamp: dict[str, Any]) -> Path:
+    executable = managed_cli_path(target)
+    version_executable = software_tree_binary_path(target)
+    if not executable.is_absolute() or executable.is_symlink():
+        fail("managed agy executable must be an absolute non-symlink path")
+    executable_info = require_executable_file(
+        executable,
+        f"managed agy executable {executable}",
+    )
+    executable_content, executable_read_info = read_regular_file(
+        executable,
+        f"managed agy executable {executable}",
+        owner_only=False,
+        max_bytes=SOFTWARE_ARTIFACT_MAX_BYTES,
+    )
+    if identity_of(executable_info) != identity_of(executable_read_info):
+        raise ConcurrentTargetChange("managed agy executable changed before launch")
+    if sha256_bytes(executable_content) != stamp["binary_sha256"]:
+        fail("managed agy executable digest mismatch before launch")
+    version_info = require_executable_file(
+        version_executable,
+        f"managed software version binary {version_executable}",
+    )
+    version_content, version_read_info = read_regular_file(
+        version_executable,
+        f"managed software version binary {version_executable}",
+        owner_only=False,
+        max_bytes=SOFTWARE_ARTIFACT_MAX_BYTES,
+    )
+    if identity_of(version_info) != identity_of(version_read_info):
+        raise ConcurrentTargetChange("managed software version binary changed before launch")
+    if sha256_bytes(version_content) != stamp["binary_sha256"]:
+        fail("managed software version binary digest mismatch before launch")
+    return executable
+
+
+def validate_launch_ready_unlocked(target: Path, child_args: list[str]) -> Path:
     validate_launch_args(child_args)
+    require_clean_current(target)
+    status = software_status(target)
+    if not status["installed"] or not status["current"]:
+        fail("launch requires current target-owned Antigravity CLI software")
+    stamp = load_software_stamp(target)
+    if stamp is None:
+        fail("launch requires target-owned Antigravity CLI software stamp")
+    return recheck_launch_executable(target, stamp)
+
+
+def validate_launch_ready(target: Path, child_args: list[str]) -> Path:
     with target_lock(target, create=False):
-        require_clean_current(target)
-        status = software_status(target)
-        if not status["installed"] or not status["current"]:
-            fail("launch requires current target-owned Antigravity CLI software")
-        executable = managed_cli_path(target)
-        if not executable.is_absolute() or executable.is_symlink():
-            fail("managed agy executable must be an absolute non-symlink path")
-        require_executable_file(executable, f"managed agy executable {executable}")
-        return executable
+        return validate_launch_ready_unlocked(target, child_args)
 
 
 def launch(target: Path, child_args: list[str]) -> int:
-    executable = validate_launch_ready(target, child_args)
-    return subprocess.call([str(executable), *child_args], env=build_launch_env(target))
+    with target_lock(target, create=False):
+        executable = validate_launch_ready_unlocked(target, child_args)
+        env = build_launch_env(target)
+        return subprocess.call([str(executable), *child_args], env=env)
 
 
 def emit(payload: dict[str, Any] | list[Any], *, as_json: bool) -> None:
