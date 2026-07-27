@@ -812,6 +812,8 @@ def check_no_production_test_switches(errors: list[str]) -> None:
         return
     forbidden_patterns = {
         r"NDDEV_[A-Z0-9_]*TEST[A-Z0-9_]*": "NDDEV test environment switch",
+        r"NDDEV_[A-Z0-9_]*(?:BOOTSTRAP|LOCK|ROOT|TEMP|TMP|OVERRIDE)[A-Z0-9_]*": "NDDEV public lock/root override",
+        r"ANTIGRAVITY_[A-Z0-9_]*(?:BOOTSTRAP|LOCK|ROOT|TEMP|TMP|OVERRIDE)[A-Z0-9_]*": "Antigravity public lock/root override",
         r"\bALLOW_TEST[A-Z0-9_]*\b": "ALLOW_TEST switch",
         r"\bTEST_(?:ARTIFACT|FAIL|TIMEOUT|SOURCE)[A-Z0-9_]*\b": "test behavior switch",
         r"\b(?:FIXTURE|SOURCE)_OVERRIDE[A-Z0-9_]*\b": "fixture/source override",
@@ -1026,24 +1028,124 @@ def fork_external_lock_try_worker(
     return pid
 
 
+def snapshot_file_type(info: os.stat_result) -> str:
+    if stat.S_ISDIR(info.st_mode):
+        return "directory"
+    if stat.S_ISREG(info.st_mode):
+        return "regular"
+    if stat.S_ISLNK(info.st_mode):
+        return "symlink"
+    return "other"
+
+
+def snapshot_bootstrap_child(
+    errors: list[str],
+    manager: Any,
+    path: Path,
+) -> dict[str, Any]:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        return {"name": path.name, "error": f"lstat:{exc.__class__.__name__}"}
+    item: dict[str, Any] = {
+        "name": path.name,
+        "type": snapshot_file_type(info),
+        "mode": stat.S_IMODE(info.st_mode),
+        "owner": info.st_uid if hasattr(info, "st_uid") else None,
+        "st_dev": info.st_dev,
+        "st_ino": info.st_ino,
+        "nlink": info.st_nlink,
+    }
+    if stat.S_ISREG(info.st_mode):
+        item["declared_size"] = info.st_size
+        if info.st_size > manager.METADATA_MAX_BYTES:
+            errors.append(f"production bootstrap child exceeds snapshot limit: {path}")
+            item["sha256"] = "<too-large>"
+        else:
+            try:
+                content, read_info = manager.read_regular_file(
+                    path,
+                    f"production bootstrap child {path}",
+                    owner_only=False,
+                    max_bytes=manager.METADATA_MAX_BYTES,
+                )
+            except manager.ManagerError as exc:
+                item["read_error"] = str(exc)
+            else:
+                item["size"] = len(content)
+                item["sha256"] = manager.sha256_bytes(content)
+                item["read_st_dev"] = read_info.st_dev
+                item["read_st_ino"] = read_info.st_ino
+    return item
+
+
+def snapshot_bootstrap_product_root(
+    errors: list[str],
+    manager: Any,
+    product_root: Path,
+) -> dict[str, Any]:
+    if not product_root.exists() and not product_root.is_symlink():
+        return {"exists": False}
+    try:
+        info = product_root.lstat()
+    except OSError as exc:
+        return {"exists": True, "error": f"lstat:{exc.__class__.__name__}"}
+    snapshot: dict[str, Any] = {
+        "exists": True,
+        "type": snapshot_file_type(info),
+        "mode": stat.S_IMODE(info.st_mode),
+        "owner": info.st_uid if hasattr(info, "st_uid") else None,
+        "st_dev": info.st_dev,
+        "st_ino": info.st_ino,
+        "nlink": info.st_nlink,
+    }
+    if not stat.S_ISDIR(info.st_mode):
+        return snapshot
+    children: list[dict[str, Any]] = []
+    try:
+        child_paths = sorted(product_root.iterdir(), key=lambda child: child.name)
+    except OSError as exc:
+        snapshot["children_error"] = f"iterdir:{exc.__class__.__name__}"
+        return snapshot
+    for child in child_paths:
+        children.append(snapshot_bootstrap_child(errors, manager, child))
+    snapshot["children"] = children
+    return snapshot
+
+
 @contextlib.contextmanager
 def isolated_bootstrap_root(errors: list[str], manager: Any) -> Iterator[Path]:
     original_system_temp_root = manager.system_temp_root
-    probe = Path("/tmp") / "nddev-antigravity-cli-app-validator-probe"
-    production_pool = manager.external_lock_file_path(probe).parent
-    before = sorted(path.name for path in production_pool.iterdir()) if production_pool.exists() else []
+    production_pool = manager.external_lock_pool_path()
+    before = snapshot_bootstrap_product_root(errors, manager, production_pool)
     with tempfile.TemporaryDirectory() as raw:
-        root = Path(raw) / "bootstrap-root"
-        root.mkdir(mode=0o700)
-        os.chmod(root, 0o700)
-        manager.system_temp_root = lambda: root
+        root = Path(raw) / "sticky-system-root"
+        root.mkdir(mode=0o777)
+        os.chmod(root, 0o1777)
+
+        def injected_system_temp_root() -> Path:
+            info = manager.require_directory(root, "injected bootstrap system temp root")
+            if stat.S_ISLNK(info.st_mode):
+                manager.fail("injected bootstrap system temp root must be a real directory")
+            if stat.S_IMODE(info.st_mode) != 0o1777:
+                manager.fail("injected bootstrap system temp root must be mode 01777")
+            if hasattr(os, "geteuid") and manager.owner_of(info) != os.geteuid():
+                manager.fail("injected bootstrap system temp root must be owned by current user")
+            return root
+
+        manager.system_temp_root = injected_system_temp_root
         try:
+            resolved = manager.system_temp_root()
+            if resolved != root:
+                errors.append("isolated bootstrap resolver returned the wrong root")
+            if stat.S_IMODE(root.stat().st_mode) != 0o1777:
+                errors.append("isolated bootstrap root is not sticky mode 01777")
             yield root
         finally:
             manager.system_temp_root = original_system_temp_root
-    after = sorted(path.name for path in production_pool.iterdir()) if production_pool.exists() else []
+    after = snapshot_bootstrap_product_root(errors, manager, production_pool)
     if after != before:
-        errors.append("isolated bootstrap validation created real system bootstrap artifacts")
+        errors.append("isolated bootstrap validation mutated real system bootstrap artifacts")
 
 
 def snapshot_target_regular_files(target: Path) -> dict[str, bytes]:
