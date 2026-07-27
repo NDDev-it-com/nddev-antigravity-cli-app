@@ -26,6 +26,11 @@ CLI_VERSION = "1.1.7"
 CLAUDE_BRIDGE_DIR = ".claude"
 CLAUDE_BRIDGE_PATH = ".claude/CLAUDE.md"
 CLAUDE_BRIDGE_BYTES = b"@../AGENTS.md\n"
+CLAUDE_IMPORT_TARGET = "AGENTS.md"
+REQUIRED_CLAUDE_RUNTIME_PATHS = {
+    CLAUDE_BRIDGE_DIR,
+    CLAUDE_IMPORT_TARGET,
+}
 SETUP_IDS = ["nddev-builder"]
 PROFILE_IDS = ["full-auto", "safe"]
 DEFAULT_PROFILE = "full-auto"
@@ -125,7 +130,7 @@ REQUIRED_ARCHIVE_PATHS = {
     "VERSION",
     "CHANGELOG.md",
     "SECURITY.md",
-    "AGENTS.md",
+    CLAUDE_IMPORT_TARGET,
     CLAUDE_BRIDGE_DIR,
     ".gitignore",
     ".gds",
@@ -142,6 +147,7 @@ BASE_RUNTIME_PATHS = {
     "README.md",
     "LICENSE",
     "VERSION",
+    CLAUDE_IMPORT_TARGET,
     CLAUDE_BRIDGE_DIR,
     "build",
     "cli-tools",
@@ -388,6 +394,11 @@ def check_release_workflow(
 
     archive_paths = workflow_block_tokens(text, "archive_paths", errors)
     runtime_paths = workflow_block_tokens(text, "runtime_paths", errors)
+    for path in sorted(REQUIRED_CLAUDE_RUNTIME_PATHS):
+        if path not in archive_paths:
+            errors.append(f"{RELEASE_WORKFLOW}: archive_paths must explicitly include {path}")
+        if path not in runtime_paths:
+            errors.append(f"{RELEASE_WORKFLOW}: runtime_paths must explicitly include {path}")
     missing_archive = sorted(REQUIRED_ARCHIVE_PATHS - archive_paths)
     if missing_archive:
         errors.append(f"{RELEASE_WORKFLOW}: archive_paths missing {missing_archive}")
