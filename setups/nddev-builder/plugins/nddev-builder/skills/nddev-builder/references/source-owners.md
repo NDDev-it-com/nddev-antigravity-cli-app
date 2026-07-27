@@ -6,8 +6,10 @@ these owners instead of copying their values.
 - Build version and tested runtime: `VERSION` and `build/version.json`
 - Public contract and managed state contract: `config/nddev-contract.json`
 - Runtime setup manifest: `build/manifest.json`
-- Official runtime source ledger and artifact pins:
-  `references/antigravity-cli-baseline.json`
+- Official runtime source ledger and artifact pins: use the module-root
+  baseline reference named by the public contract, or query current installed
+  state with the public manager's `list --json` and `software-status --json`
+  commands.
 - Profile payloads: `profiles/<profile-id>/settings.json`
 - Content setup payload: `setups/nddev-builder/`
 - Manager behavior, stamps, locks, backups, software lifecycle, launch policy:

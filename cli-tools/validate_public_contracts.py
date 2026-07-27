@@ -473,6 +473,29 @@ def source_for_builder_target(relative: str) -> str:
     return f"setups/nddev-builder/plugins/nddev-builder/{relative[len(prefix):]}"
 
 
+def is_projected_local_reference(raw: str) -> bool:
+    if "\n" in raw or raw.startswith(("http://", "https://", "~", "$", "<")):
+        return False
+    if raw.startswith(("./", "../", "references/")):
+        return True
+    return raw.startswith("nddev-builder/references/")
+
+
+def check_projected_local_references(text: str, relative: str, errors: list[str]) -> None:
+    base = (ROOT / relative).parent
+    for raw in re.findall(r"`([^`]+)`", text):
+        if not is_projected_local_reference(raw):
+            continue
+        resolved = (base / raw).resolve()
+        try:
+            display = resolved.relative_to(ROOT.resolve())
+        except ValueError:
+            errors.append(f"{relative}: projected reference escapes repository: {raw}")
+            continue
+        if not resolved.is_file():
+            errors.append(f"{relative}: unresolved projected local reference {raw}: {display}")
+
+
 def check_profiles(errors: list[str]) -> None:
     for profile_id, expected in EXPECTED_SETTINGS.items():
         profile = load_json(f"profiles/{profile_id}/profile.json", errors)
@@ -509,23 +532,25 @@ def check_setup_toolkit(errors: list[str]) -> None:
     }:
         errors.append("nddev-builder plugin.json: exact native manifest mismatch")
     for managed in BUILDER_MANAGED_FILES:
-        text = read_text(source_for_builder_target(managed), errors)
+        source_relative = source_for_builder_target(managed)
+        text = read_text(source_relative, errors)
         if text is None:
             continue
+        check_projected_local_references(text, source_relative, errors)
         if managed.endswith("/SKILL.md"):
-            metadata = parse_frontmatter(text, source_for_builder_target(managed), errors)
+            metadata = parse_frontmatter(text, source_relative, errors)
             if set(metadata) != {"name", "description"}:
-                errors.append(f"{source_for_builder_target(managed)}: skill frontmatter keys mismatch")
+                errors.append(f"{source_relative}: skill frontmatter keys mismatch")
             folder_name = Path(managed).parent.name
             if metadata.get("name") != folder_name:
-                errors.append(f"{source_for_builder_target(managed)}: skill name must match folder")
+                errors.append(f"{source_relative}: skill name must match folder")
             if not metadata.get("description", "").strip():
-                errors.append(f"{source_for_builder_target(managed)}: description required")
+                errors.append(f"{source_relative}: description required")
             for forbidden in ("validation/nddev-", ".serena/", "release-evidence"):
                 if forbidden in text:
-                    errors.append(f"{source_for_builder_target(managed)}: private artifact reference {forbidden}")
+                    errors.append(f"{source_relative}: private artifact reference {forbidden}")
         if re.search(r"\b\d+\.\d+\.\d+\b", text):
-            errors.append(f"{source_for_builder_target(managed)}: volatile version literal")
+            errors.append(f"{source_relative}: volatile version literal")
     entry = read_text(
         "setups/nddev-builder/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
         errors,

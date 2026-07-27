@@ -23,7 +23,7 @@ Use this skill for `AGENTS.md`, `GEMINI.md`, plugin rules, and skill content.
 - Focused skills carry task-specific instructions.
 - References hold stable path/schema guidance.
 - Volatile pins, versions, digests, and current setup lists stay in code-owned
-  files listed by `nddev-builder/references/source-owners.md`.
+  files listed by `../nddev-builder/references/source-owners.md`.
 
 ## Check
 
