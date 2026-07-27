@@ -141,6 +141,14 @@ BASE_RUNTIME_PATHS = {
     "config",
     "references",
 }
+IGNORED_TREE_PARTS = {".git", "__pycache__"}
+PRIVATE_TREE_PARTS = {
+    ".agents",
+    ".claude",
+    ".serena",
+    "release-evidence",
+    "validation",
+}
 
 
 def load_json(relative: str, errors: list[str]) -> dict[str, Any] | None:
@@ -176,7 +184,38 @@ def read_text(relative: str, errors: list[str]) -> str | None:
     return text
 
 
-def tracked_files(errors: list[str]) -> set[str]:
+def public_tree_paths(errors: list[str]) -> set[str]:
+    paths: set[str] = set()
+    for path in ROOT.rglob("*"):
+        try:
+            relative = path.relative_to(ROOT).as_posix()
+        except ValueError:
+            continue
+        parts = set(Path(relative).parts)
+        if parts & IGNORED_TREE_PARTS:
+            continue
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            errors.append(f"public tree path cannot be inspected: {relative}: {exc}")
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            errors.append(f"public tree path must not be a symlink: {relative}")
+            continue
+        if not stat.S_ISREG(info.st_mode) and not stat.S_ISDIR(info.st_mode):
+            errors.append(f"public tree path has unsupported file type: {relative}")
+            continue
+        private_markers = sorted(parts & PRIVATE_TREE_PARTS)
+        if private_markers:
+            errors.append(f"public tree contains private marker path {private_markers}: {relative}")
+            continue
+        paths.add(relative)
+    return paths
+
+
+def tracked_files(errors: list[str]) -> set[str] | None:
+    if not (ROOT / ".git").exists():
+        return None
     result = subprocess.run(
         ["git", "-C", str(ROOT), "ls-files"],
         text=True,
@@ -202,15 +241,19 @@ def is_normalized_release_path(value: str) -> bool:
     )
 
 
-def declared_path_is_tracked(value: str, tracked: set[str]) -> bool:
+def declared_path_exists_safely(value: str, public_paths: set[str]) -> bool:
     path = ROOT / value
-    if not path.exists():
+    try:
+        info = path.lstat()
+    except OSError:
         return False
-    if path.is_file():
-        return value in tracked
-    if path.is_dir():
+    if stat.S_ISLNK(info.st_mode):
+        return False
+    if stat.S_ISREG(info.st_mode):
+        return value in public_paths
+    if stat.S_ISDIR(info.st_mode):
         prefix = f"{value}/"
-        return any(item.startswith(prefix) for item in tracked)
+        return value in public_paths and any(item.startswith(prefix) for item in public_paths)
     return False
 
 
@@ -225,6 +268,18 @@ def path_covered_by_tokens(value: str, tokens: set[str]) -> bool:
         except ValueError:
             continue
         return True
+    return False
+
+
+def declared_path_is_tracked(value: str, tracked: set[str] | None) -> bool:
+    if tracked is None:
+        return True
+    path = ROOT / value
+    if path.is_file():
+        return value in tracked
+    if path.is_dir():
+        prefix = f"{value}/"
+        return any(item.startswith(prefix) for item in tracked)
     return False
 
 
@@ -310,9 +365,8 @@ def check_release_workflow(
     text = read_text(RELEASE_WORKFLOW, errors)
     if text is None:
         return
+    public_paths = public_tree_paths(errors)
     tracked = tracked_files(errors)
-    if not tracked:
-        return
 
     uses = re.findall(r"(?m)^    uses:\s+(\S+)(?:\s+#\s*(\S+))?\s*$", text)
     if uses != [(RELEASE_SUPPLY_CHAIN_CALLER, RELEASE_SUPPLY_CHAIN_VERSION_COMMENT)]:
@@ -342,19 +396,23 @@ def check_release_workflow(
         ("runtime_paths", runtime_paths),
     ):
         for token in sorted(token_set):
-            if not declared_path_is_tracked(token, tracked):
+            if not declared_path_exists_safely(token, public_paths):
+                errors.append(
+                    f"{RELEASE_WORKFLOW}: {token_set_name} path is missing or unsafe: {token}"
+                )
+            elif not declared_path_is_tracked(token, tracked):
                 errors.append(f"{RELEASE_WORKFLOW}: {token_set_name} path is not tracked: {token}")
     for token in sorted(runtime_paths):
         if not path_covered_by_tokens(token, archive_paths):
             errors.append(f"{RELEASE_WORKFLOW}: runtime path is outside archive: {token}")
-    tracked_docs = {
+    public_docs = {
         path
-        for path in tracked
+        for path in public_paths
         if path.endswith(".md") or path.startswith("docs/")
     }
-    for path in sorted(tracked_docs):
+    for path in sorted(public_docs):
         if not path_covered_by_tokens(path, archive_paths):
-            errors.append(f"{RELEASE_WORKFLOW}: tracked documentation not archived: {path}")
+            errors.append(f"{RELEASE_WORKFLOW}: public documentation not archived: {path}")
 
 
 def read_build_version(errors: list[str]) -> str | None:
