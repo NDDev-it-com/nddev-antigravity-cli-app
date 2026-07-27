@@ -166,7 +166,9 @@
     "rollback_on_failure": true,
     "bounded_reads": true,
     "max_backups": 10,
-    "backup_pool_lock": true
+    "backup_pool_location": ".nddev-antigravity-cli-backups",
+    "backup_pool_lock": ".nddev-antigravity-cli-backups-lock",
+    "target_lock": ".nddev-antigravity-cli-lock"
   },
   "runtime_compatibility": {
     "product": "Antigravity CLI",

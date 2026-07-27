@@ -39,6 +39,10 @@ Updates stage a complete version tree under the target and atomically rename it
 into place. On failure, the manager restores the previous version tree, the
 visible `bin/agy`, and the software stamp.
 
+Setup backups and locks are target-internal private directories under the
+explicit target. The manager rejects symlinked or non-private lock, backup
+pool, and backup slot paths.
+
 ## Launch safety
 
 `launch` validates the managed setup and target-owned `bin/agy` while holding

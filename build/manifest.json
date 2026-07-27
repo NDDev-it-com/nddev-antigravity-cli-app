@@ -171,7 +171,8 @@
     "pip": null
   },
   "backup_policy": {
-    "location": "sibling .<target-name>.nddev-antigravity-cli-backups",
+    "location": "<target>/.nddev-antigravity-cli-backups",
+    "lock": "<target>/.nddev-antigravity-cli-backups-lock",
     "envelope": "NDDEV-ANTIGRAVITY-CLI-BACKUP.json",
     "slots": 10,
     "canonical_target_bound": true,

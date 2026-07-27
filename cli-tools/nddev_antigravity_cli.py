@@ -15,7 +15,6 @@ import json
 import os
 import platform as py_platform
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -186,9 +185,6 @@ LEGACY_BACKUP_KEYS = {
     "managed_files",
     "stamp_sha256",
 }
-
-INTERNAL_ARTIFACT_ENV = "NDDEV_ANTIGRAVITY_CLI_TEST_ARTIFACT_URL"
-INTERNAL_FAIL_AFTER_VERSION_SWAP_ENV = "NDDEV_ANTIGRAVITY_CLI_TEST_FAIL_AFTER_VERSION_SWAP"
 
 SECRET_ENV_PREFIXES = (
     "GOOGLE_",
@@ -584,11 +580,56 @@ def ensure_target_directory(target: Path, *, create: bool) -> bool:
     except FileNotFoundError:
         if not create:
             return False
-        target.mkdir(mode=OWNER_DIR_MODE)
-        os.chmod(target, OWNER_DIR_MODE)
+        created = False
+        try:
+            target.mkdir(mode=OWNER_DIR_MODE)
+            created = True
+        except FileExistsError:
+            pass
+        info = target.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            fail("--target must be a real directory")
+        if created:
+            os.chmod(target, OWNER_DIR_MODE)
+            info = target.lstat()
+        if not is_private_directory(info):
+            fail("--target must be owned by the current user with mode 0700")
         return True
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         fail("--target must be a real directory")
+    return True
+
+
+def is_private_directory(info: os.stat_result) -> bool:
+    if not stat.S_ISDIR(info.st_mode):
+        return False
+    if stat.S_IMODE(info.st_mode) != OWNER_DIR_MODE:
+        return False
+    return not hasattr(os, "geteuid") or owner_of(info) == os.geteuid()
+
+
+def require_private_directory(path: Path, label: str) -> os.stat_result:
+    info = require_directory(path, label)
+    if not is_private_directory(info):
+        fail(f"{label} must be owned by the current user with mode 0700")
+    return info
+
+
+def require_private_target(target: Path) -> None:
+    require_private_directory(target, "--target")
+
+
+def require_owner_directory(path: Path, label: str) -> os.stat_result:
+    info = require_directory(path, label)
+    if hasattr(os, "geteuid") and owner_of(info) != os.geteuid():
+        fail(f"{label} must be owned by the current user")
+    return info
+
+
+def ensure_private_target(target: Path, *, create: bool) -> bool:
+    if not ensure_target_directory(target, create=create):
+        return False
+    require_private_target(target)
     return True
 
 
@@ -959,14 +1000,8 @@ def pinned_manifest(platform_key: str | None = None) -> dict[str, str]:
 
 
 def read_artifact(source: str) -> bytes:
-    if source.startswith("file://"):
-        path = Path(source[7:])
-        content, _ = read_regular_file(
-            path,
-            f"software artifact {path}",
-            max_bytes=SOFTWARE_ARTIFACT_MAX_BYTES,
-        )
-        return content
+    if not source.startswith("https://"):
+        fail("software artifact source must be an HTTPS official source")
     request = urllib.request.Request(
         source,
         headers={"User-Agent": f"{PRODUCT_NAME}/{VERSION}"},
@@ -1063,16 +1098,14 @@ def extract_cli_binary_from_tar(archive: bytes) -> bytes:
 
 def prepare_cli_artifact() -> dict[str, Any]:
     manifest = pinned_manifest()
-    test_artifact_url = os.environ.get(INTERNAL_ARTIFACT_ENV)
-    if test_artifact_url is None:
-        observed = read_official_manifest(manifest["manifest_url"])
-        expected = {key: manifest[key] for key in ("version", "url", "sha512")}
-        if observed != expected:
-            fail("official Antigravity CLI manifest no longer matches the pinned baseline")
-    source_url = test_artifact_url or manifest["url"]
+    observed = read_official_manifest(manifest["manifest_url"])
+    expected = {key: manifest[key] for key in ("version", "url", "sha512")}
+    if observed != expected:
+        fail("official Antigravity CLI manifest no longer matches the pinned baseline")
+    source_url = manifest["url"]
     archive = read_artifact(source_url)
     artifact_sha512 = sha512_bytes(archive)
-    if test_artifact_url is None and artifact_sha512 != manifest["sha512"]:
+    if artifact_sha512 != manifest["sha512"]:
         fail("official Antigravity CLI artifact SHA-512 mismatch")
     binary = extract_cli_binary_from_tar(archive)
     binary_sha256 = sha256_bytes(binary)
@@ -1198,7 +1231,7 @@ def reject_existing_software_ancestor_links(target: Path, path: Path, label: str
 
 def expected_software_identity() -> dict[str, Any]:
     manifest = pinned_manifest()
-    identity: dict[str, Any] = {
+    return {
         "build_version": VERSION,
         "version": CLI_VERSION,
         "platform": manifest["platform"],
@@ -1206,14 +1239,9 @@ def expected_software_identity() -> dict[str, Any]:
         "installer_sha256": INSTALL_SCRIPT_SHA256,
         "manifest_url": manifest["manifest_url"],
         "manifest_version": manifest["version"],
+        "artifact_url": manifest["url"],
+        "artifact_sha512": manifest["sha512"],
     }
-    test_artifact_url = os.environ.get(INTERNAL_ARTIFACT_ENV)
-    if test_artifact_url is None:
-        identity["artifact_url"] = manifest["url"]
-        identity["artifact_sha512"] = manifest["sha512"]
-    else:
-        identity["artifact_url"] = test_artifact_url
-    return identity
 
 
 def software_status(target: Path) -> dict[str, Any]:
@@ -1230,6 +1258,7 @@ def software_status(target: Path) -> dict[str, Any]:
             "drift": [],
             "current": False,
         }
+    require_private_target(target)
     stamp = load_software_stamp(target)
     binary = managed_cli_path(target)
     version_binary = None if stamp is None else software_tree_binary_path(target, CLI_VERSION)
@@ -1298,9 +1327,12 @@ def ensure_real_directory_path(path: Path, label: str) -> None:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             fail(f"{label} must be a real directory")
+        if not is_private_directory(info):
+            fail(f"{label} must be owned by the current user with mode 0700")
         return
     path.mkdir(mode=OWNER_DIR_MODE, parents=True)
     os.chmod(path, OWNER_DIR_MODE)
+    require_private_directory(path, label)
 
 
 def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
@@ -1345,6 +1377,12 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
         )[0]
     root = software_root(target)
     versions = root / "versions"
+    for guarded_path, label in (
+        (root, "software root"),
+        (versions, "software versions directory"),
+        (version_dir, "software version path"),
+    ):
+        reject_existing_software_ancestor_links(target, guarded_path, label)
     ensure_real_directory_path(root, "software root")
     ensure_real_directory_path(versions, "software versions directory")
     before_version_exists = False
@@ -1352,6 +1390,7 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
         info = version_dir.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             fail("software version path is unsafe")
+        require_private_directory(version_dir, "software version path")
         before_version_exists = True
     reject_symlink_ancestors(target, "bin/agy")
     reject_symlink_ancestors(
@@ -1373,20 +1412,17 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
         changed.append(str(Path(".nddev-software/antigravity-cli") / SOFTWARE_STAMP_NAME))
     try:
         staging.mkdir(mode=OWNER_DIR_MODE)
+        os.chmod(staging, OWNER_DIR_MODE)
+        require_private_directory(staging, "software staging directory")
         atomic_write_executable(staging / CLI_COMMAND, artifact["binary"])
         if before_version_exists:
             version_dir.rename(rollback_version)
         staging.rename(version_dir)
-        if os.environ.get(INTERNAL_FAIL_AFTER_VERSION_SWAP_ENV) == "1":
-            fail("injected failure after software version swap")
         atomic_write_executable(binary_path, artifact["binary"])
         atomic_write(stamp_path, stamp_bytes)
     except BaseException:
         if version_dir.exists() or version_dir.is_symlink():
-            if version_dir.is_dir() and not version_dir.is_symlink():
-                shutil.rmtree(version_dir)
-            else:
-                version_dir.unlink()
+            remove_private_tree_if_present(version_dir, "software version directory")
         if rollback_version.exists():
             rollback_version.rename(version_dir)
         if before_binary is None:
@@ -1399,16 +1435,16 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
                 stamp_path.unlink()
         else:
             atomic_write(stamp_path, before_stamp)
-        with contextlib.suppress(FileNotFoundError):
-            shutil.rmtree(staging)
-        with contextlib.suppress(FileNotFoundError):
-            shutil.rmtree(rollback_version)
+        with contextlib.suppress(FileNotFoundError, ManagerError):
+            remove_private_tree_if_present(staging, "software staging directory")
+        with contextlib.suppress(FileNotFoundError, ManagerError):
+            remove_private_tree_if_present(rollback_version, "software rollback directory")
         raise
     finally:
-        with contextlib.suppress(FileNotFoundError):
-            shutil.rmtree(staging)
-    with contextlib.suppress(FileNotFoundError):
-        shutil.rmtree(rollback_version)
+        with contextlib.suppress(FileNotFoundError, ManagerError):
+            remove_private_tree_if_present(staging, "software staging directory")
+    with contextlib.suppress(FileNotFoundError, ManagerError):
+        remove_private_tree_if_present(rollback_version, "software rollback directory")
     final_status = software_status(target)
     return {
         "schema_version": 1,
@@ -1429,7 +1465,7 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
 
 
 def install_cli(target: Path, command: str) -> dict[str, Any]:
-    with target_lock(target):
+    with target_lock(target, create=command == "install-cli"):
         return install_cli_unlocked(target, command)
 
 
@@ -1477,63 +1513,126 @@ def restore_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
 
 
 @contextlib.contextmanager
-def target_lock(target: Path) -> Iterator[None]:
-    lock = target.parent / f".{target.name}.nddev-antigravity-cli-lock"
+def target_lock(target: Path, *, create: bool) -> Iterator[None]:
+    if not ensure_private_target(target, create=create):
+        fail("--target is missing")
+    lock = target / ".nddev-antigravity-cli-lock"
+    created = False
     try:
         lock.mkdir(mode=OWNER_DIR_MODE)
+        created = True
+        os.chmod(lock, OWNER_DIR_MODE)
+        require_private_directory(lock, "target lock")
     except FileExistsError:
+        if lock.is_symlink():
+            fail("target lock path must not be a symlink")
+        require_private_directory(lock, "target lock")
         fail(f"target is already locked: {lock}")
     try:
         yield
     finally:
-        with contextlib.suppress(FileNotFoundError):
+        with contextlib.suppress(FileNotFoundError, OSError):
+            if created:
+                require_private_directory(lock, "target lock")
             lock.rmdir()
 
 
 def backup_pool(target: Path) -> Path:
-    return target.parent / f".{target.name}.nddev-antigravity-cli-backups"
+    return target / ".nddev-antigravity-cli-backups"
 
 
 @contextlib.contextmanager
 def backup_pool_lock(target: Path) -> Iterator[None]:
-    lock = target.parent / f".{target.name}.nddev-antigravity-cli-backups-lock"
+    require_private_target(target)
+    lock = target / ".nddev-antigravity-cli-backups-lock"
+    created = False
     try:
         lock.mkdir(mode=OWNER_DIR_MODE)
+        created = True
+        os.chmod(lock, OWNER_DIR_MODE)
+        require_private_directory(lock, "backup pool lock")
     except FileExistsError:
+        if lock.is_symlink():
+            fail("backup pool lock path must not be a symlink")
+        require_private_directory(lock, "backup pool lock")
         fail(f"backup pool is already locked: {lock}")
     try:
         yield
     finally:
-        with contextlib.suppress(FileNotFoundError):
+        with contextlib.suppress(FileNotFoundError, OSError):
+            if created:
+                require_private_directory(lock, "backup pool lock")
             lock.rmdir()
 
 
 def choose_backup_slot(pool: Path) -> int:
     if not pool.exists():
         return 0
-    slots = sorted(
-        int(path.name)
-        for path in pool.iterdir()
-        if path.is_dir() and path.name.isdigit() and 0 <= int(path.name) < MAX_BACKUPS
-    )
+    require_private_directory(pool, "backup pool")
+    slots: list[int] = []
+    for path in pool.iterdir():
+        if path.name == BACKUP_NAME:
+            fail("backup pool contains an invalid envelope at pool root")
+        if path.is_symlink():
+            fail(f"backup pool entry must not be a symlink: {path.name}")
+        if not path.name.isdigit():
+            fail(f"backup pool entry has an invalid name: {path.name}")
+        slot = int(path.name)
+        if slot < 0 or slot >= MAX_BACKUPS:
+            fail(f"backup pool entry has an out-of-range slot: {path.name}")
+        require_private_directory(path, f"backup slot {path.name}")
+        slots.append(slot)
+    slots.sort()
     if not slots:
         return 0
     return (slots[-1] + 1) % MAX_BACKUPS
 
 
+def remove_private_tree(path: Path, label: str, *, private_root: bool = True) -> None:
+    if private_root:
+        require_private_directory(path, label)
+    else:
+        require_owner_directory(path, label)
+    for child in path.iterdir():
+        child_info = child.lstat()
+        if stat.S_ISLNK(child_info.st_mode):
+            fail(f"{label} contains a symlink and will not be removed: {child.name}")
+        if stat.S_ISDIR(child_info.st_mode):
+            remove_private_tree(child, f"{label}/{child.name}", private_root=False)
+            continue
+        if not stat.S_ISREG(child_info.st_mode):
+            fail(f"{label} contains a non-regular file: {child.name}")
+        if hasattr(os, "geteuid") and owner_of(child_info) != os.geteuid():
+            fail(f"{label} contains a foreign-owned file: {child.name}")
+        child.unlink()
+    path.rmdir()
+
+
+def remove_private_tree_if_present(path: Path, label: str) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink():
+        fail(f"{label} must not be a symlink")
+    remove_private_tree(path, label)
+
+
 def write_backup(target: Path, stamp: dict[str, Any]) -> int:
     with backup_pool_lock(target):
         pool = backup_pool(target)
-        if pool.exists() and pool.is_symlink():
-            fail("backup pool must not be a symlink")
-        pool.mkdir(mode=OWNER_DIR_MODE, exist_ok=True)
-        os.chmod(pool, OWNER_DIR_MODE)
+        if pool.exists() or pool.is_symlink():
+            require_private_directory(pool, "backup pool")
+        else:
+            pool.mkdir(mode=OWNER_DIR_MODE)
+            os.chmod(pool, OWNER_DIR_MODE)
+            require_private_directory(pool, "backup pool")
         slot = choose_backup_slot(pool)
         slot_dir = pool / str(slot)
-        if slot_dir.exists():
-            shutil.rmtree(slot_dir)
+        if slot_dir.exists() or slot_dir.is_symlink():
+            remove_private_tree(slot_dir, f"backup slot {slot}")
         files_dir = slot_dir / "files"
         files_dir.mkdir(parents=True, mode=OWNER_DIR_MODE)
+        os.chmod(slot_dir, OWNER_DIR_MODE)
+        os.chmod(files_dir, OWNER_DIR_MODE)
         source_files = stamp_managed_files(stamp)
         managed_files: dict[str, str | None] = {}
         for relative in source_files:
@@ -1568,14 +1667,16 @@ def read_backup_files(
     files: tuple[str, ...],
 ) -> dict[str, bytes | None]:
     result: dict[str, bytes | None] = {relative: None for relative in MANAGED_FILES}
+    require_private_directory(slot_dir, "backup slot")
     files_dir = slot_dir / "files"
+    require_private_directory(files_dir, "backup files directory")
     for relative in files:
         expected = managed_files[relative]
         path = files_dir / safe_relative_path(relative)
         if expected is None:
             result[relative] = None
             continue
-        content, _ = read_regular_file(path, f"backup file {relative}", owner_only=False)
+        content, _ = read_regular_file(path, f"backup file {relative}", owner_only=True)
         if managed_digest(relative, content) != expected:
             fail(f"backup file digest mismatch: {relative}")
         result[relative] = content
@@ -1583,13 +1684,16 @@ def read_backup_files(
 
 
 def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[str, bytes | None]]:
+    require_private_target(target)
     if slot < 0 or slot >= MAX_BACKUPS:
         fail("--backup must be between 0 and 9")
+    require_private_directory(backup_pool(target), "backup pool")
     slot_dir = backup_pool(target) / str(slot)
+    require_private_directory(slot_dir, f"backup slot {slot}")
     envelope_path = slot_dir / BACKUP_NAME
     if envelope_path.is_symlink() or not envelope_path.is_file():
         fail(f"backup slot is missing: {slot}")
-    envelope = read_json_file(envelope_path, f"backup slot {slot}", owner_only=False)
+    envelope = read_json_file(envelope_path, f"backup slot {slot}", owner_only=True)
     if envelope.get("schema_version") == LEGACY_BACKUP_SCHEMA:
         if set(envelope) != LEGACY_BACKUP_KEYS:
             fail("legacy backup envelope has invalid keys")
@@ -1655,6 +1759,7 @@ def current_status(target: Path) -> dict[str, Any]:
             "drift": [],
             "builder": {"projection": "native-plugin", "enabled": False},
         }
+    require_private_target(target)
     stamp = load_stamp(target)
     if stamp is None:
         return {
@@ -1736,7 +1841,7 @@ def require_clean_current(target: Path) -> dict[str, Any]:
 def mutate_setup(target: Path, setup_id: str, profile_id: str, action: str) -> dict[str, Any]:
     setup = render_setup(setup_id)
     profile = render_profile(profile_id)
-    with target_lock(target):
+    with target_lock(target, create=action != "switch"):
         ensure_target_directory(target, create=True)
         existing_stamp = load_stamp(target)
         if existing_stamp is None:
@@ -1782,7 +1887,7 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, action: str) -> d
 def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
     setup = render_setup(setup_id)
     profile = render_profile(profile_id)
-    with target_lock(target):
+    with target_lock(target, create=False):
         existing_stamp = require_clean_managed_any(target)
         if not is_legacy_stamp(existing_stamp):
             fail("migrate requires a legacy managed target")
@@ -1807,7 +1912,7 @@ def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any
 
 
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
-    with target_lock(target):
+    with target_lock(target, create=False):
         stamp = require_clean_managed_any(target)
         _, files = load_backup(target, slot)
         backup_slot = write_backup(target, stamp)
@@ -1832,7 +1937,7 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
-    with target_lock(target):
+    with target_lock(target, create=False):
         stamp = require_clean_managed_any(target)
         backup_slot = write_backup(target, stamp)
         before = snapshot_managed_files(target)
@@ -1909,7 +2014,7 @@ def validate_launch_args(child_args: list[str]) -> None:
 
 def validate_launch_ready(target: Path, child_args: list[str]) -> Path:
     validate_launch_args(child_args)
-    with target_lock(target):
+    with target_lock(target, create=False):
         require_clean_current(target)
         status = software_status(target)
         if not status["installed"] or not status["current"]:

@@ -5,10 +5,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+
+sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_EXPECTED = "0.2.0"
@@ -304,6 +309,13 @@ def check_contracts(errors: list[str]) -> None:
             errors.append("build/manifest.json: artifact pin fields mismatch")
         if software.get("npm") is not None or software.get("pip") is not None:
             errors.append("build/manifest.json: npm/pip must stay null")
+        backup = manifest.get("backup_policy", {})
+        if backup.get("location") != "<target>/.nddev-antigravity-cli-backups":
+            errors.append("build/manifest.json: backup location must be target-internal")
+        if backup.get("lock") != "<target>/.nddev-antigravity-cli-backups-lock":
+            errors.append("build/manifest.json: backup lock must be target-internal")
+        if backup.get("pool_lock") is not True:
+            errors.append("build/manifest.json: backup pool lock must be enabled")
     if contract is not None:
         if contract.get("contract_version") != 2:
             errors.append("config/nddev-contract.json: contract_version must be 2")
@@ -319,6 +331,13 @@ def check_contracts(errors: list[str]) -> None:
             errors.append("config/nddev-contract.json: legacy launch denial required")
         if contract.get("builder", {}).get("marketplace") is not None:
             errors.append("config/nddev-contract.json: builder marketplace must be null")
+        safety = contract.get("safety", {})
+        if safety.get("target_lock") != ".nddev-antigravity-cli-lock":
+            errors.append("config/nddev-contract.json: target lock must be target-internal")
+        if safety.get("backup_pool_location") != ".nddev-antigravity-cli-backups":
+            errors.append("config/nddev-contract.json: backup pool must be target-internal")
+        if safety.get("backup_pool_lock") != ".nddev-antigravity-cli-backups-lock":
+            errors.append("config/nddev-contract.json: backup pool lock must be target-internal")
     if baseline is not None:
         if baseline.get("schema_version") != 2:
             errors.append("baseline schema_version must be 2")
@@ -407,6 +426,277 @@ def check_manager_constants(errors: list[str]) -> None:
             errors.append(f"manager parse_args rejected {argv}: {exc}")
 
 
+def check_no_production_test_switches(errors: list[str]) -> None:
+    source = read_text("cli-tools/nddev_antigravity_cli.py", errors)
+    if source is None:
+        return
+    forbidden_patterns = {
+        r"NDDEV_[A-Z0-9_]*TEST[A-Z0-9_]*": "NDDEV test environment switch",
+        r"\bALLOW_TEST[A-Z0-9_]*\b": "ALLOW_TEST switch",
+        r"\bTEST_(?:ARTIFACT|FAIL|TIMEOUT|SOURCE)[A-Z0-9_]*\b": "test behavior switch",
+        r"\b(?:FIXTURE|SOURCE)_OVERRIDE[A-Z0-9_]*\b": "fixture/source override",
+        r"file://": "local fixture source support",
+        r"injected failure": "artificial failure hook",
+    }
+    for pattern, label in forbidden_patterns.items():
+        if re.search(pattern, source):
+            errors.append(f"manager exposes forbidden production test path: {label}")
+
+
+def expect_manager_error(
+    errors: list[str],
+    label: str,
+    manager: Any,
+    callback: Any,
+    expected_fragment: str | None = None,
+) -> None:
+    try:
+        callback()
+    except manager.ManagerError as exc:
+        if expected_fragment is not None and expected_fragment not in str(exc):
+            errors.append(f"{label}: wrong error: {exc}")
+    else:
+        errors.append(f"{label}: expected ManagerError")
+
+
+def chmod_private(path: Path) -> None:
+    os.chmod(path, 0o700)
+
+
+def install_fake_current_software(manager: Any, target: Path, script: bytes) -> None:
+    manifest = manager.pinned_manifest()
+    artifact = {
+        "platform": manifest["platform"],
+        "manifest_url": manifest["manifest_url"],
+        "manifest_version": manifest["version"],
+        "artifact_url": manifest["url"],
+        "artifact_size": len(script),
+        "artifact_sha512": manifest["sha512"],
+        "binary_sha256": manager.sha256_bytes(script),
+    }
+    for guarded_path, label in (
+        (manager.software_root(target), "test software root"),
+        (manager.software_root(target) / "versions", "test software versions directory"),
+        (manager.software_version_dir(target), "test software version directory"),
+    ):
+        manager.reject_existing_software_ancestor_links(target, guarded_path, label)
+    manager.ensure_real_directory_path(manager.software_root(target), "test software root")
+    manager.ensure_real_directory_path(
+        manager.software_root(target) / "versions",
+        "test software versions directory",
+    )
+    manager.ensure_real_directory_path(
+        manager.software_version_dir(target),
+        "test software version directory",
+    )
+    manager.atomic_write_executable(manager.managed_cli_path(target), script)
+    manager.atomic_write_executable(manager.software_tree_binary_path(target), script)
+    manager.atomic_write(
+        manager.software_stamp_path(target),
+        manager.canonical_json(manager.software_stamp(target, artifact)),
+    )
+
+
+def check_adversarial_smokes(errors: list[str]) -> None:
+    manager = import_manager(errors)
+    if manager is None:
+        return
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "world-target"
+        target.mkdir()
+        os.chmod(target, 0o777)
+        expect_manager_error(
+            errors,
+            "0777 target install",
+            manager,
+            lambda: manager.mutate_setup(
+                target,
+                manager.DEFAULT_SETUP_ID,
+                manager.DEFAULT_PROFILE_ID,
+                "install",
+            ),
+            "mode 0700",
+        )
+
+    with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as raw:
+        root = Path(raw)
+        target = root / "sticky-valid-target"
+        result = manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        if result.get("setup_id") != manager.DEFAULT_SETUP_ID:
+            errors.append("sticky temp target install: setup id mismatch")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "lock-target"
+        target.mkdir(mode=0o700)
+        chmod_private(target)
+        marker = root / "external-marker"
+        marker.write_text("keep\n", encoding="utf-8")
+        os.symlink(marker, target / ".nddev-antigravity-cli-lock")
+        expect_manager_error(
+            errors,
+            "symlink target lock",
+            manager,
+            lambda: manager.mutate_setup(
+                target,
+                manager.DEFAULT_SETUP_ID,
+                manager.DEFAULT_PROFILE_ID,
+                "install",
+            ),
+            "symlink",
+        )
+        if marker.read_text(encoding="utf-8") != "keep\n":
+            errors.append("symlink target lock: external marker changed")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "backup-pool-target"
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        marker_dir = root / "external-dir"
+        marker_dir.mkdir()
+        marker = marker_dir / "marker"
+        marker.write_text("keep\n", encoding="utf-8")
+        os.symlink(marker_dir, target / ".nddev-antigravity-cli-backups")
+        expect_manager_error(
+            errors,
+            "symlink backup pool",
+            manager,
+            lambda: manager.mutate_setup(target, manager.DEFAULT_SETUP_ID, "safe", "switch"),
+            "backup pool",
+        )
+        if marker.read_text(encoding="utf-8") != "keep\n":
+            errors.append("symlink backup pool: external marker changed")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "backup-slot-target"
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        marker_dir = root / "external-slot"
+        marker_dir.mkdir()
+        marker = marker_dir / "marker"
+        marker.write_text("keep\n", encoding="utf-8")
+        pool = target / ".nddev-antigravity-cli-backups"
+        pool.mkdir(mode=0o700)
+        chmod_private(pool)
+        os.symlink(marker_dir, pool / "0")
+        expect_manager_error(
+            errors,
+            "symlink backup slot",
+            manager,
+            lambda: manager.mutate_setup(target, manager.DEFAULT_SETUP_ID, "safe", "switch"),
+            "symlink",
+        )
+        if marker.read_text(encoding="utf-8") != "keep\n":
+            errors.append("symlink backup slot: external marker changed")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "backup-lock-target"
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        marker = root / "backup-lock-marker"
+        marker.write_text("keep\n", encoding="utf-8")
+        os.symlink(marker, target / ".nddev-antigravity-cli-backups-lock")
+        expect_manager_error(
+            errors,
+            "symlink backup pool lock",
+            manager,
+            lambda: manager.mutate_setup(target, manager.DEFAULT_SETUP_ID, "safe", "switch"),
+            "symlink",
+        )
+        if marker.read_text(encoding="utf-8") != "keep\n":
+            errors.append("symlink backup pool lock: external marker changed")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "software-link-target"
+        target.mkdir(mode=0o700)
+        chmod_private(target)
+        marker_dir = root / "external-software"
+        marker_dir.mkdir()
+        marker = marker_dir / "marker"
+        marker.write_text("keep\n", encoding="utf-8")
+        os.symlink(marker_dir, target / ".nddev-software")
+        expect_manager_error(
+            errors,
+            "symlink software ancestor",
+            manager,
+            lambda: manager.reject_existing_software_ancestor_links(
+                target,
+                manager.software_root(target),
+                "software root",
+            ),
+            "unsafe",
+        )
+        if marker.read_text(encoding="utf-8") != "keep\n":
+            errors.append("symlink software ancestor: external marker changed")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "path-target"
+        fake_path = root / "fake-path"
+        fake_path.mkdir()
+        fake_python = fake_path / "python3"
+        fake_python.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        os.chmod(fake_python, 0o700)
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        install_fake_current_software(
+            manager,
+            target,
+            b"#!/bin/sh\nprintf '%s\\n' \"$PATH\"\n",
+        )
+        executable = manager.validate_launch_ready(target, [])
+        old_path = os.environ.get("PATH")
+        os.environ["PATH"] = str(fake_path)
+        try:
+            env = manager.build_launch_env(target)
+        finally:
+            if old_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old_path
+        if str(fake_path) in env.get("PATH", ""):
+            errors.append("fake PATH launch env: inherited attacker PATH")
+        launched = subprocess.run(
+            [str(executable)],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if launched.returncode != 0:
+            errors.append(f"fake PATH launch env: fake agy failed: {launched.stderr}")
+        if str(fake_path) in launched.stdout:
+            errors.append("fake PATH launch env: child observed attacker PATH")
+
+
 def check_no_current_forbidden_surfaces(errors: list[str]) -> None:
     for forbidden_path in (
         "setups/safe",
@@ -439,6 +729,8 @@ def main() -> int:
     check_setup_toolkit(errors)
     check_contracts(errors)
     check_manager_constants(errors)
+    check_no_production_test_switches(errors)
+    check_adversarial_smokes(errors)
     check_no_current_forbidden_surfaces(errors)
     if errors:
         print(f"validate_public_contracts.py: FAIL ({len(errors)} error(s))")
