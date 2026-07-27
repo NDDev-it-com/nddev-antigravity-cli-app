@@ -124,6 +124,8 @@
     "target_lock_mechanism": "persistent-target-internal-flock-file",
     "immediate_executable_digest_recheck": true,
     "executable_handoff": "write-protected-verified-path",
+    "protected_path_scope": "lock-and-artifact-directories-only",
+    "runtime_state_writable_during_child": true,
     "portable_fd_execution": false,
     "same_uid_chmod_resistance": false,
     "lifecycle_mutations_blocked_while_child_runs": true,

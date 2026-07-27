@@ -539,6 +539,10 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             errors.append("build/manifest.json: target lock mechanism mismatch")
         if launch.get("executable_handoff") != "write-protected-verified-path":
             errors.append("build/manifest.json: executable handoff mismatch")
+        if launch.get("protected_path_scope") != "lock-and-artifact-directories-only":
+            errors.append("build/manifest.json: protected path scope mismatch")
+        if launch.get("runtime_state_writable_during_child") is not True:
+            errors.append("build/manifest.json: runtime state writability must be true")
         if launch.get("portable_fd_execution") is not False:
             errors.append("build/manifest.json: portable fd execution claim must be false")
         if launch.get("same_uid_chmod_resistance") is not False:
@@ -593,6 +597,10 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             errors.append("config/nddev-contract.json: target lock mechanism mismatch")
         if launch.get("executable_handoff") != "write-protected-verified-path":
             errors.append("config/nddev-contract.json: executable handoff mismatch")
+        if launch.get("protected_path_scope") != "lock-and-artifact-directories-only":
+            errors.append("config/nddev-contract.json: protected path scope mismatch")
+        if launch.get("runtime_state_writable_during_child") is not True:
+            errors.append("config/nddev-contract.json: runtime state writability must be true")
         if launch.get("portable_fd_execution") is not False:
             errors.append("config/nddev-contract.json: portable fd execution claim must be false")
         if launch.get("same_uid_chmod_resistance") is not False:
@@ -992,7 +1000,7 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
             "executable = target / 'bin' / 'agy'\n"
             "replacement = Path(os.environ['TMPDIR']) / 'replacement-agy'\n"
             "replacement.write_text('#!/bin/sh\\nexit 0\\n', encoding='utf-8')\n"
-            "results = {}\n"
+            "results = {'mutation_attempts': {}, 'runtime_writes': {}}\n"
             "for label, callback in (\n"
             "    ('unlink_lock_file', lambda: os.unlink(lock_file)),\n"
             "    ('unlink_executable', lambda: os.unlink(executable)),\n"
@@ -1001,9 +1009,26 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
             "    try:\n"
             "        callback()\n"
             "    except OSError as exc:\n"
-            "        results[label] = exc.__class__.__name__\n"
+            "        results['mutation_attempts'][label] = exc.__class__.__name__\n"
             "    else:\n"
-            "        results[label] = 'succeeded'\n"
+            "        results['mutation_attempts'][label] = 'succeeded'\n"
+            "runtime_targets = (\n"
+            "    ('home', Path(os.environ['HOME']) / 'runtime-home-proof.txt'),\n"
+            "    ('tmp', Path(os.environ['TMPDIR']) / 'runtime-tmp-proof.txt'),\n"
+            "    ('xdg_config', Path(os.environ['XDG_CONFIG_HOME']) / 'runtime-config-proof.txt'),\n"
+            "    ('xdg_data', Path(os.environ['XDG_DATA_HOME']) / 'runtime-data-proof.txt'),\n"
+            "    ('xdg_state', Path(os.environ['XDG_STATE_HOME']) / 'runtime-state-proof.txt'),\n"
+            "    ('xdg_cache', Path(os.environ['XDG_CACHE_HOME']) / 'runtime-cache-proof.txt'),\n"
+            "    ('antigravity_session', Path(os.environ['HOME']) / '.gemini' / 'antigravity-cli' / 'runtime-session-proof.txt'),\n"
+            ")\n"
+            "for label, path in runtime_targets:\n"
+            "    try:\n"
+            "        path.parent.mkdir(parents=True, exist_ok=True)\n"
+            "        path.write_text(label + '\\n', encoding='utf-8')\n"
+            "    except OSError as exc:\n"
+            "        results['runtime_writes'][label] = 'error:' + exc.__class__.__name__\n"
+            "    else:\n"
+            "        results['runtime_writes'][label] = str(path)\n"
             "capture.write_text(json.dumps(results, sort_keys=True), encoding='utf-8')\n"
             "ready.write_text('ready\\n', encoding='utf-8')\n"
             "while not stop.exists():\n"
@@ -1044,15 +1069,64 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
                 errors.append("launch lock concurrency: target lock file missing")
             elif stat.S_IMODE(lock_file.stat().st_mode) != 0o600:
                 errors.append("launch lock concurrency: target lock file mode mismatch")
-            for guarded in manager.launch_handoff_directories(target):
+            env_runtime_dirs = {
+                target,
+                target / ".tmp",
+                target / ".xdg",
+                target / ".gemini",
+                target / ".gemini" / "antigravity-cli",
+                target / ".xdg" / "config",
+                target / ".xdg" / "data",
+                target / ".xdg" / "state",
+                target / ".xdg" / "cache",
+            }
+            guarded_dirs = set(manager.launch_handoff_directories(target))
+            for mutable_dir in sorted(env_runtime_dirs):
+                if mutable_dir in guarded_dirs:
+                    errors.append(f"launch handoff: mutable runtime directory guarded: {mutable_dir}")
+            for guarded in guarded_dirs:
                 if not guarded.is_dir():
                     errors.append(f"launch handoff: guarded directory missing: {guarded}")
                 elif stat.S_IMODE(guarded.stat().st_mode) != 0o500:
                     errors.append(f"launch handoff: guarded directory is writable: {guarded}")
-            child_attempts = json.loads(capture.read_text(encoding="utf-8"))
+            child_report = json.loads(capture.read_text(encoding="utf-8"))
+            child_attempts = child_report.get("mutation_attempts")
+            if not isinstance(child_attempts, dict):
+                errors.append("launch lock concurrency: child mutation report missing")
+                child_attempts = {}
             for label, outcome in child_attempts.items():
                 if outcome == "succeeded":
                     errors.append(f"launch lock concurrency: child {label} unexpectedly succeeded")
+            runtime_writes = child_report.get("runtime_writes")
+            expected_runtime_writes = {
+                "home",
+                "tmp",
+                "xdg_config",
+                "xdg_data",
+                "xdg_state",
+                "xdg_cache",
+                "antigravity_session",
+            }
+            if not isinstance(runtime_writes, dict):
+                errors.append("launch runtime write proof: child report missing")
+                runtime_writes = {}
+            if set(runtime_writes) != expected_runtime_writes:
+                errors.append("launch runtime write proof: incomplete runtime write set")
+            for label, raw_path in runtime_writes.items():
+                if not isinstance(raw_path, str) or raw_path.startswith("error:"):
+                    errors.append(f"launch runtime write proof: {label} failed: {raw_path}")
+                    continue
+                runtime_path = Path(raw_path)
+                if not runtime_path.is_relative_to(target):
+                    errors.append(f"launch runtime write proof: {label} escaped target")
+                    continue
+                try:
+                    content = runtime_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    errors.append(f"launch runtime write proof: {label} unreadable: {exc}")
+                    continue
+                if content != f"{label}\n":
+                    errors.append(f"launch runtime write proof: {label} content mismatch")
             replacement = root / "ordinary-replacement-agy"
             replacement.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             for label, callback in (

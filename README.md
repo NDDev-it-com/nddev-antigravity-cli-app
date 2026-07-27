@@ -101,9 +101,12 @@ python3 cli-tools/nddev_antigravity_cli.py launch --target /absolute/agy-home --
 through child process completion, requires clean managed setup state, current
 target-owned software, immediate executable digest recheck, the absolute
 target-owned executable, and a filtered child environment. The executable
-handoff is a write-protected verified-path handoff: the manager does not claim
-portable fd execution, and without a sandbox it does not claim resistance
-against a deliberate same-UID process that changes directory modes.
+handoff is a write-protected verified-path handoff: the manager protects only
+the dedicated lock parent and immutable launcher/software artifact directories.
+It does not make the target HOME, TMPDIR, XDG homes, or Antigravity config tree
+read-only for the child. The manager does not claim portable fd execution, and
+without a sandbox it does not claim resistance against a deliberate same-UID
+process that changes directory modes.
 
 ## Public validation
 
