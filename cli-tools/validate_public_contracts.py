@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -534,6 +535,14 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
         ):
             if launch.get(key) is not True:
                 errors.append(f"build/manifest.json: runtime_launch.{key} must be true")
+        if launch.get("target_lock_mechanism") != "persistent-target-internal-flock-file":
+            errors.append("build/manifest.json: target lock mechanism mismatch")
+        if launch.get("executable_handoff") != "write-protected-verified-path":
+            errors.append("build/manifest.json: executable handoff mismatch")
+        if launch.get("portable_fd_execution") is not False:
+            errors.append("build/manifest.json: portable fd execution claim must be false")
+        if launch.get("same_uid_chmod_resistance") is not False:
+            errors.append("build/manifest.json: same-UID chmod resistance claim must be false")
         software = manifest.get("software_install", {})
         if software.get("mechanism") != "official-antigravity-install-manifest":
             errors.append("build/manifest.json: software mechanism mismatch")
@@ -580,6 +589,14 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
         ):
             if launch.get(key) is not True:
                 errors.append(f"config/nddev-contract.json: runtime_launch.{key} must be true")
+        if launch.get("target_lock_mechanism") != "persistent-target-internal-flock-file":
+            errors.append("config/nddev-contract.json: target lock mechanism mismatch")
+        if launch.get("executable_handoff") != "write-protected-verified-path":
+            errors.append("config/nddev-contract.json: executable handoff mismatch")
+        if launch.get("portable_fd_execution") is not False:
+            errors.append("config/nddev-contract.json: portable fd execution claim must be false")
+        if launch.get("same_uid_chmod_resistance") is not False:
+            errors.append("config/nddev-contract.json: same-UID chmod resistance claim must be false")
         safety = contract.get("safety", {})
         if safety.get("target_lock") != ".nddev-antigravity-cli-lock":
             errors.append("config/nddev-contract.json: target lock must be target-internal")
@@ -693,6 +710,27 @@ def check_no_production_test_switches(errors: list[str]) -> None:
             errors.append(f"manager exposes forbidden production test path: {label}")
 
 
+def check_runtime_lock_source(errors: list[str]) -> None:
+    source = read_text("cli-tools/nddev_antigravity_cli.py", errors)
+    if source is None:
+        return
+    required_fragments = (
+        "fcntl.flock",
+        "fcntl.LOCK_EX | fcntl.LOCK_NB",
+        "O_NOFOLLOW",
+        "TARGET_LOCK_FILE_NAME",
+        "protected_launch_handoff",
+        "subprocess.Popen",
+    )
+    for fragment in required_fragments:
+        if fragment not in source:
+            errors.append(f"manager runtime lock source missing {fragment}")
+    forbidden_claims = ("fexecve", "execveat")
+    for fragment in forbidden_claims:
+        if fragment in source:
+            errors.append(f"manager source must not claim portable fd execution: {fragment}")
+
+
 def expect_manager_error(
     errors: list[str],
     label: str,
@@ -723,30 +761,25 @@ def install_fake_current_software(manager: Any, target: Path, script: bytes) -> 
         "binary_sha256": manager.sha256_bytes(script),
     }
     for guarded_path, label in (
+        (manager.software_root(target).parent, "test software base directory"),
         (manager.software_root(target), "test software root"),
         (manager.software_root(target) / "versions", "test software versions directory"),
         (manager.software_version_dir(target), "test software version directory"),
     ):
         manager.reject_existing_software_ancestor_links(target, guarded_path, label)
-    manager.ensure_real_directory_path(manager.software_root(target), "test software root")
-    manager.ensure_real_directory_path(
-        manager.software_root(target) / "versions",
-        "test software versions directory",
-    )
-    manager.ensure_real_directory_path(
-        manager.software_version_dir(target),
-        "test software version directory",
-    )
+    for guarded_path, label in (
+        (manager.software_root(target).parent, "test software base directory"),
+        (manager.software_root(target), "test software root"),
+        (manager.software_root(target) / "versions", "test software versions directory"),
+        (manager.software_version_dir(target), "test software version directory"),
+    ):
+        manager.ensure_real_directory_path(guarded_path, label)
     manager.atomic_write_executable(manager.managed_cli_path(target), script)
     manager.atomic_write_executable(manager.software_tree_binary_path(target), script)
     manager.atomic_write(
         manager.software_stamp_path(target),
         manager.canonical_json(manager.software_stamp(target, artifact)),
     )
-
-
-def shell_single_quote(value: Path) -> str:
-    return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
 def wait_for_file(path: Path, process: subprocess.Popen[str], errors: list[str], label: str) -> bool:
@@ -944,11 +977,38 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
         target = manager.resolve_target(str(root / "launch-lock-target"))
         ready = root / "child-ready"
         stop = root / "child-stop"
+        capture = root / "child-capture.json"
         script = (
-            "#!/bin/sh\n"
-            f"printf '%s\\n' ready > {shell_single_quote(ready)}\n"
-            f"while [ ! -f {shell_single_quote(stop)} ]; do sleep 0.05; done\n"
-            "exit 0\n"
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import os\n"
+            "import time\n"
+            "from pathlib import Path\n"
+            f"target = Path({str(target)!r})\n"
+            f"ready = Path({str(ready)!r})\n"
+            f"stop = Path({str(stop)!r})\n"
+            f"capture = Path({str(capture)!r})\n"
+            "lock_file = target / '.nddev-antigravity-cli-lock' / 'lock'\n"
+            "executable = target / 'bin' / 'agy'\n"
+            "replacement = Path(os.environ['TMPDIR']) / 'replacement-agy'\n"
+            "replacement.write_text('#!/bin/sh\\nexit 0\\n', encoding='utf-8')\n"
+            "results = {}\n"
+            "for label, callback in (\n"
+            "    ('unlink_lock_file', lambda: os.unlink(lock_file)),\n"
+            "    ('unlink_executable', lambda: os.unlink(executable)),\n"
+            "    ('replace_executable', lambda: os.replace(replacement, executable)),\n"
+            "):\n"
+            "    try:\n"
+            "        callback()\n"
+            "    except OSError as exc:\n"
+            "        results[label] = exc.__class__.__name__\n"
+            "    else:\n"
+            "        results[label] = 'succeeded'\n"
+            "capture.write_text(json.dumps(results, sort_keys=True), encoding='utf-8')\n"
+            "ready.write_text('ready\\n', encoding='utf-8')\n"
+            "while not stop.exists():\n"
+            "    time.sleep(0.05)\n"
+            "raise SystemExit(0)\n"
         ).encode("utf-8")
         manager.mutate_setup(
             target,
@@ -973,8 +1033,38 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
         try:
             if not wait_for_file(ready, process, errors, "launch lock concurrency"):
                 return
-            if not (target / ".nddev-antigravity-cli-lock").is_dir():
-                errors.append("launch lock concurrency: target lock missing while child runs")
+            lock_parent = target / ".nddev-antigravity-cli-lock"
+            lock_file = lock_parent / "lock"
+            executable = target / "bin" / "agy"
+            if not lock_parent.is_dir():
+                errors.append("launch lock concurrency: target lock parent missing")
+            elif stat.S_IMODE(lock_parent.stat().st_mode) != 0o500:
+                errors.append("launch lock concurrency: target lock parent is writable")
+            if not lock_file.is_file():
+                errors.append("launch lock concurrency: target lock file missing")
+            elif stat.S_IMODE(lock_file.stat().st_mode) != 0o600:
+                errors.append("launch lock concurrency: target lock file mode mismatch")
+            for guarded in manager.launch_handoff_directories(target):
+                if not guarded.is_dir():
+                    errors.append(f"launch handoff: guarded directory missing: {guarded}")
+                elif stat.S_IMODE(guarded.stat().st_mode) != 0o500:
+                    errors.append(f"launch handoff: guarded directory is writable: {guarded}")
+            child_attempts = json.loads(capture.read_text(encoding="utf-8"))
+            for label, outcome in child_attempts.items():
+                if outcome == "succeeded":
+                    errors.append(f"launch lock concurrency: child {label} unexpectedly succeeded")
+            replacement = root / "ordinary-replacement-agy"
+            replacement.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for label, callback in (
+                ("ordinary executable unlink", lambda: executable.unlink()),
+                ("ordinary executable replace", lambda: os.replace(replacement, executable)),
+            ):
+                try:
+                    callback()
+                except OSError:
+                    pass
+                else:
+                    errors.append(f"launch handoff: {label} unexpectedly succeeded")
             expect_manager_error(
                 errors,
                 "launch lock concurrency mutation",
@@ -986,6 +1076,8 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
                     "switch",
                 ),
             )
+            if lock_parent.is_dir() and stat.S_IMODE(lock_parent.stat().st_mode) != 0o500:
+                errors.append("launch lock concurrency: contention made lock parent writable")
             stop.write_text("stop\n", encoding="utf-8")
             try:
                 stdout, stderr = process.communicate(timeout=5)
@@ -998,8 +1090,13 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
                     "launch lock concurrency: launch returned "
                     f"{process.returncode}: {stdout}{stderr}"
                 )
-            if (target / ".nddev-antigravity-cli-lock").exists():
-                errors.append("launch lock concurrency: target lock was not cleaned up")
+            if not lock_parent.is_dir() or not lock_file.is_file():
+                errors.append("launch lock concurrency: persistent lock disappeared")
+            elif stat.S_IMODE(lock_parent.stat().st_mode) != 0o700:
+                errors.append("launch lock concurrency: target lock parent was not restored")
+            for guarded in manager.launch_handoff_directories(target):
+                if guarded.exists() and stat.S_IMODE(guarded.stat().st_mode) != 0o700:
+                    errors.append(f"launch handoff: guarded directory was not restored: {guarded}")
         finally:
             if process.poll() is None:
                 stop.write_text("stop\n", encoding="utf-8")
@@ -1065,6 +1162,48 @@ def check_adversarial_smokes(errors: list[str]) -> None:
         )
         if marker.read_text(encoding="utf-8") != "keep\n":
             errors.append("symlink target lock: external marker changed")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "lock-file-target"
+        target.mkdir(mode=0o700)
+        chmod_private(target)
+        lock_parent = target / ".nddev-antigravity-cli-lock"
+        lock_parent.mkdir(mode=0o700)
+        chmod_private(lock_parent)
+        marker = root / "external-lock-file-marker"
+        marker.write_text("keep\n", encoding="utf-8")
+        os.symlink(marker, lock_parent / "lock")
+        expect_manager_error(
+            errors,
+            "symlink target lock file",
+            manager,
+            lambda: manager.mutate_setup(
+                target,
+                manager.DEFAULT_SETUP_ID,
+                manager.DEFAULT_PROFILE_ID,
+                "install",
+            ),
+        )
+        if marker.read_text(encoding="utf-8") != "keep\n":
+            errors.append("symlink target lock file: external marker changed")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "lock-recovery-target"
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        lock_parent = target / ".nddev-antigravity-cli-lock"
+        os.chmod(lock_parent, 0o500)
+        result = manager.mutate_setup(target, manager.DEFAULT_SETUP_ID, "safe", "switch")
+        if result.get("profile_id") != "safe":
+            errors.append("lock parent recovery: switch did not complete")
+        if stat.S_IMODE(lock_parent.stat().st_mode) != 0o700:
+            errors.append("lock parent recovery: lock parent mode was not restored")
 
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -1243,6 +1382,7 @@ def main() -> int:
     check_contracts(errors, build_version)
     check_manager_constants(errors, build_version)
     check_no_production_test_switches(errors)
+    check_runtime_lock_source(errors)
     check_adversarial_smokes(errors)
     check_no_current_forbidden_surfaces(errors)
     if errors:

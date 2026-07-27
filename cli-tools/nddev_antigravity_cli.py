@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -47,11 +48,14 @@ SOFTWARE_STAMP_SCHEMA = 2
 MAX_BACKUPS = 10
 OWNER_FILE_MODE = 0o600
 OWNER_DIR_MODE = 0o700
+OWNER_READ_EXEC_DIR_MODE = 0o500
 OWNER_EXEC_MODE = 0o700
 METADATA_MAX_BYTES = 256 * 1024
 MANAGED_PAYLOAD_MAX_BYTES = 1024 * 1024
 SOFTWARE_ARTIFACT_MAX_BYTES = 300 * 1024 * 1024
 DEFAULT_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+TARGET_LOCK_DIR_NAME = ".nddev-antigravity-cli-lock"
+TARGET_LOCK_FILE_NAME = "lock"
 
 CLI_VERSION = "1.1.7"
 CLI_COMMAND = "agy"
@@ -634,6 +638,75 @@ def require_private_directory(path: Path, label: str) -> os.stat_result:
     if not is_private_directory(info):
         fail(f"{label} must be owned by the current user with mode 0700")
     return info
+
+
+def is_owner_directory_with_mode(info: os.stat_result, modes: set[int]) -> bool:
+    if not stat.S_ISDIR(info.st_mode):
+        return False
+    if stat.S_IMODE(info.st_mode) not in modes:
+        return False
+    return not hasattr(os, "geteuid") or owner_of(info) == os.geteuid()
+
+
+def require_owner_directory_modes(
+    path: Path,
+    label: str,
+    modes: set[int],
+) -> os.stat_result:
+    info = require_directory(path, label)
+    if not is_owner_directory_with_mode(info, modes):
+        rendered = ", ".join(f"{mode:04o}" for mode in sorted(modes))
+        fail(f"{label} must be owned by the current user with mode {rendered}")
+    return info
+
+
+def nofollow_flag(label: str) -> int:
+    if not hasattr(os, "O_NOFOLLOW"):
+        fail(f"{label} requires O_NOFOLLOW support")
+    return os.O_NOFOLLOW
+
+
+def open_owner_directory_fd(
+    path: Path,
+    label: str,
+    modes: set[int],
+) -> tuple[int, os.stat_result]:
+    before = require_owner_directory_modes(path, label, modes)
+    flags = os.O_RDONLY | nofollow_flag(label)
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        fail(f"{label} cannot be opened safely: {exc}")
+    try:
+        opened = os.fstat(descriptor)
+        if identity_of(opened) != identity_of(before):
+            raise ConcurrentTargetChange(f"{label} changed while it was opened")
+        if not is_owner_directory_with_mode(opened, modes):
+            rendered = ", ".join(f"{mode:04o}" for mode in sorted(modes))
+            fail(f"{label} fd must be owned by the current user with mode {rendered}")
+        return descriptor, opened
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def set_directory_fd_mode(
+    descriptor: int,
+    path: Path,
+    label: str,
+    mode: int,
+) -> None:
+    os.fchmod(descriptor, mode)
+    opened = os.fstat(descriptor)
+    if not is_owner_directory_with_mode(opened, {mode}):
+        fail(f"{label} fd mode did not become {mode:04o}")
+    current = require_owner_directory_modes(path, label, {mode})
+    if identity_of(current) != identity_of(opened):
+        raise ConcurrentTargetChange(f"{label} changed while its mode was adjusted")
 
 
 def require_private_target(target: Path) -> None:
@@ -1347,15 +1420,23 @@ def software_status(target: Path) -> dict[str, Any]:
 
 def ensure_real_directory_path(path: Path, label: str) -> None:
     if path.exists() or path.is_symlink():
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            fail(f"{label} must be a real directory")
-        if not is_private_directory(info):
-            fail(f"{label} must be owned by the current user with mode 0700")
+        descriptor, _ = open_owner_directory_fd(
+            path,
+            label,
+            {OWNER_DIR_MODE, OWNER_READ_EXEC_DIR_MODE},
+        )
+        try:
+            if stat.S_IMODE(os.fstat(descriptor).st_mode) != OWNER_DIR_MODE:
+                set_directory_fd_mode(descriptor, path, label, OWNER_DIR_MODE)
+        finally:
+            os.close(descriptor)
         return
     path.mkdir(mode=OWNER_DIR_MODE, parents=True)
-    os.chmod(path, OWNER_DIR_MODE)
-    require_private_directory(path, label)
+    descriptor, _ = open_owner_directory_fd(path, label, {OWNER_DIR_MODE})
+    try:
+        set_directory_fd_mode(descriptor, path, label, OWNER_DIR_MODE)
+    finally:
+        os.close(descriptor)
 
 
 def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
@@ -1399,13 +1480,16 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
             max_bytes=METADATA_MAX_BYTES,
         )[0]
     root = software_root(target)
+    software_base = root.parent
     versions = root / "versions"
     for guarded_path, label in (
+        (software_base, "software base directory"),
         (root, "software root"),
         (versions, "software versions directory"),
         (version_dir, "software version path"),
     ):
         reject_existing_software_ancestor_links(target, guarded_path, label)
+    ensure_real_directory_path(software_base, "software base directory")
     ensure_real_directory_path(root, "software root")
     ensure_real_directory_path(versions, "software versions directory")
     before_version_exists = False
@@ -1539,25 +1623,94 @@ def restore_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
 def target_lock(target: Path, *, create: bool) -> Iterator[None]:
     if not ensure_private_target(target, create=create):
         fail("--target is missing")
-    lock = target / ".nddev-antigravity-cli-lock"
-    created = False
+    lock_parent = target / TARGET_LOCK_DIR_NAME
+    lock_file = lock_parent / TARGET_LOCK_FILE_NAME
+    parent_descriptor: int | None = None
+    lock_descriptor: int | None = None
+    lock_acquired = False
     try:
-        lock.mkdir(mode=OWNER_DIR_MODE)
-        created = True
-        os.chmod(lock, OWNER_DIR_MODE)
-        require_private_directory(lock, "target lock")
+        lock_parent.mkdir(mode=OWNER_DIR_MODE)
     except FileExistsError:
-        if lock.is_symlink():
-            fail("target lock path must not be a symlink")
-        require_private_directory(lock, "target lock")
-        fail(f"target is already locked: {lock}")
+        pass
+    parent_descriptor, parent_info = open_owner_directory_fd(
+        lock_parent,
+        "target lock parent",
+        {OWNER_DIR_MODE, OWNER_READ_EXEC_DIR_MODE},
+    )
     try:
+        lock_file_missing = False
+        try:
+            lock_file.lstat()
+        except FileNotFoundError:
+            lock_file_missing = True
+        if (
+            lock_file_missing
+            and stat.S_IMODE(parent_info.st_mode) == OWNER_READ_EXEC_DIR_MODE
+        ):
+            set_directory_fd_mode(
+                parent_descriptor,
+                lock_parent,
+                "target lock parent",
+                OWNER_DIR_MODE,
+            )
+        flags = os.O_RDWR | os.O_CREAT | nofollow_flag("target lock file")
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        try:
+            lock_descriptor = os.open(lock_file, flags, OWNER_FILE_MODE)
+        except OSError as exc:
+            fail(f"target lock file cannot be opened safely: {exc}")
+        lock_info = os.fstat(lock_descriptor)
+        if not stat.S_ISREG(lock_info.st_mode):
+            fail("target lock file must be a regular file")
+        if lock_info.st_nlink != 1:
+            fail("target lock file must not have hard-link aliases")
+        if hasattr(os, "geteuid") and owner_of(lock_info) != os.geteuid():
+            fail("target lock file must be owned by the current user")
+        if stat.S_IMODE(lock_info.st_mode) != OWNER_FILE_MODE:
+            if lock_file_missing:
+                os.fchmod(lock_descriptor, OWNER_FILE_MODE)
+                lock_info = os.fstat(lock_descriptor)
+            if stat.S_IMODE(lock_info.st_mode) != OWNER_FILE_MODE:
+                fail("target lock file must be owned by the current user with mode 0600")
+        try:
+            path_info = lock_file.lstat()
+        except FileNotFoundError as exc:
+            raise ConcurrentTargetChange("target lock file disappeared while opening") from exc
+        if (
+            stat.S_ISLNK(path_info.st_mode)
+            or not stat.S_ISREG(path_info.st_mode)
+            or identity_of(path_info) != identity_of(lock_info)
+        ):
+            raise ConcurrentTargetChange("target lock file changed while opening")
+        try:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail(f"target is already locked: {lock_file}")
+        lock_acquired = True
+        set_directory_fd_mode(
+            parent_descriptor,
+            lock_parent,
+            "target lock parent",
+            OWNER_READ_EXEC_DIR_MODE,
+        )
         yield
     finally:
-        with contextlib.suppress(FileNotFoundError, OSError):
-            if created:
-                require_private_directory(lock, "target lock")
-            lock.rmdir()
+        if parent_descriptor is not None and lock_acquired:
+            with contextlib.suppress(FileNotFoundError, OSError, ManagerError):
+                set_directory_fd_mode(
+                    parent_descriptor,
+                    lock_parent,
+                    "target lock parent",
+                    OWNER_DIR_MODE,
+                )
+        if lock_descriptor is not None:
+            if lock_acquired:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+            os.close(lock_descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
 
 
 def backup_pool(target: Path) -> Path:
@@ -2098,6 +2251,47 @@ def validate_launch_args(child_args: list[str]) -> None:
                 )
 
 
+def launch_handoff_directories(target: Path) -> tuple[Path, ...]:
+    return (
+        managed_cli_path(target).parent,
+        software_root(target).parent,
+        software_root(target),
+        software_root(target) / "versions",
+        software_version_dir(target),
+    )
+
+
+@contextlib.contextmanager
+def protected_launch_handoff(target: Path) -> Iterator[None]:
+    opened: list[tuple[Path, int]] = []
+    try:
+        for path in launch_handoff_directories(target):
+            descriptor, _ = open_owner_directory_fd(
+                path,
+                f"launch handoff directory {path}",
+                {OWNER_DIR_MODE, OWNER_READ_EXEC_DIR_MODE},
+            )
+            opened.append((path, descriptor))
+        for path, descriptor in opened:
+            set_directory_fd_mode(
+                descriptor,
+                path,
+                f"launch handoff directory {path}",
+                OWNER_READ_EXEC_DIR_MODE,
+            )
+        yield
+    finally:
+        for path, descriptor in reversed(opened):
+            with contextlib.suppress(FileNotFoundError, OSError, ManagerError):
+                set_directory_fd_mode(
+                    descriptor,
+                    path,
+                    f"launch handoff directory {path}",
+                    OWNER_DIR_MODE,
+                )
+            os.close(descriptor)
+
+
 def recheck_launch_executable(target: Path, stamp: dict[str, Any]) -> Path:
     executable = managed_cli_path(target)
     version_executable = software_tree_binary_path(target)
@@ -2134,7 +2328,7 @@ def recheck_launch_executable(target: Path, stamp: dict[str, Any]) -> Path:
     return executable
 
 
-def validate_launch_ready_unlocked(target: Path, child_args: list[str]) -> Path:
+def launch_ready_stamp_unlocked(target: Path, child_args: list[str]) -> dict[str, Any]:
     validate_launch_args(child_args)
     require_clean_current(target)
     status = software_status(target)
@@ -2143,6 +2337,11 @@ def validate_launch_ready_unlocked(target: Path, child_args: list[str]) -> Path:
     stamp = load_software_stamp(target)
     if stamp is None:
         fail("launch requires target-owned Antigravity CLI software stamp")
+    return stamp
+
+
+def validate_launch_ready_unlocked(target: Path, child_args: list[str]) -> Path:
+    stamp = launch_ready_stamp_unlocked(target, child_args)
     return recheck_launch_executable(target, stamp)
 
 
@@ -2153,9 +2352,12 @@ def validate_launch_ready(target: Path, child_args: list[str]) -> Path:
 
 def launch(target: Path, child_args: list[str]) -> int:
     with target_lock(target, create=False):
-        executable = validate_launch_ready_unlocked(target, child_args)
+        stamp = launch_ready_stamp_unlocked(target, child_args)
         env = build_launch_env(target)
-        return subprocess.call([str(executable), *child_args], env=env)
+        with protected_launch_handoff(target):
+            executable = recheck_launch_executable(target, stamp)
+            process = subprocess.Popen([str(executable), *child_args], env=env)
+            return process.wait()
 
 
 def emit(payload: dict[str, Any] | list[Any], *, as_json: bool) -> None:

@@ -39,9 +39,13 @@ Updates stage a complete version tree under the target and atomically rename it
 into place. On failure, the manager restores the previous version tree, the
 visible `bin/agy`, and the software stamp.
 
-Setup backups and locks are target-internal private directories under the
-explicit target. The manager rejects symlinked or non-private lock, backup
-pool, and backup slot paths.
+Setup backups and locks are target-internal under the explicit target. The
+target lifecycle lock is a persistent private lock directory containing a 0600
+regular lock file held with nonblocking `fcntl.flock` for the complete
+lifecycle operation. While held, the lock directory is traversable but not
+writable, so ordinary child cleanup cannot unlink the lock file. Backup pool
+locks remain target-internal private directories. The manager rejects
+symlinked or non-private lock, backup pool, and backup slot paths.
 
 ## Launch safety
 
@@ -49,8 +53,15 @@ pool, and backup slot paths.
 process completion. While holding that lock, it validates the managed setup,
 requires current target-owned software, immediately rechecks the target-owned
 `bin/agy` and version-tree binary digests, builds the filtered child
-environment, and executes only the absolute target-owned `bin/agy` path. Other
-lifecycle mutations fail while the launched child is running. It rejects
+environment, and starts only the absolute target-owned `bin/agy` path. During
+the child lifetime, the manager keeps the target-owned executable and software
+parent directories read/execute-only and restores their owner-private writable
+mode afterward. The protected directories are verified through `O_NOFOLLOW`
+file descriptors before mode changes and before the immediate executable digest
+recheck. This is a write-protected verified-path handoff under a no-sandbox
+same-UID threat boundary; it is not portable fd execution and does not claim
+deliberate same-UID chmod resistance. Other lifecycle mutations fail while the
+launched child is running. It rejects
 Antigravity CLI override flags that would replace the managed sandbox,
 permission, execution-mode, custom-agent, or working-directory scope for the
 session.
