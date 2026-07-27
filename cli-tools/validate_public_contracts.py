@@ -23,6 +23,9 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 PRODUCT_NAME = "nddev-antigravity-cli-app"
 CLI_VERSION = "1.1.7"
+CLAUDE_BRIDGE_DIR = ".claude"
+CLAUDE_BRIDGE_PATH = ".claude/CLAUDE.md"
+CLAUDE_BRIDGE_BYTES = b"@../AGENTS.md\n"
 SETUP_IDS = ["nddev-builder"]
 PROFILE_IDS = ["full-auto", "safe"]
 DEFAULT_PROFILE = "full-auto"
@@ -123,6 +126,7 @@ REQUIRED_ARCHIVE_PATHS = {
     "CHANGELOG.md",
     "SECURITY.md",
     "AGENTS.md",
+    CLAUDE_BRIDGE_DIR,
     ".gitignore",
     ".gds",
     ".github",
@@ -138,6 +142,7 @@ BASE_RUNTIME_PATHS = {
     "README.md",
     "LICENSE",
     "VERSION",
+    CLAUDE_BRIDGE_DIR,
     "build",
     "cli-tools",
     "config",
@@ -146,7 +151,6 @@ BASE_RUNTIME_PATHS = {
 IGNORED_TREE_PARTS = {".git", "__pycache__"}
 PRIVATE_TREE_PARTS = {
     ".agents",
-    ".claude",
     ".serena",
     "release-evidence",
     "validation",
@@ -752,6 +756,7 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
     for relative in (
         "README.md",
         "AGENTS.md",
+        CLAUDE_BRIDGE_PATH,
         "CHANGELOG.md",
         "docs/software-lifecycle.md",
         "SECURITY.md",
@@ -761,6 +766,37 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
     for workflow in WORKFLOWS:
         read_text(f".github/workflows/{workflow}", errors)
     check_release_workflow(errors, manifest, contract)
+
+
+def check_claude_bridge(errors: list[str]) -> None:
+    bridge_dir = ROOT / CLAUDE_BRIDGE_DIR
+    try:
+        dir_info = bridge_dir.lstat()
+    except OSError as exc:
+        errors.append(f"{CLAUDE_BRIDGE_DIR}: cannot inspect Claude bridge directory: {exc}")
+        return
+    if not stat.S_ISDIR(dir_info.st_mode):
+        errors.append(f"{CLAUDE_BRIDGE_DIR}: Claude bridge directory must be a real directory")
+        return
+    entries = sorted(path.name for path in bridge_dir.iterdir())
+    if entries != ["CLAUDE.md"]:
+        errors.append(f"{CLAUDE_BRIDGE_DIR}: must contain only CLAUDE.md")
+    bridge = ROOT / CLAUDE_BRIDGE_PATH
+    try:
+        info = bridge.lstat()
+    except OSError as exc:
+        errors.append(f"{CLAUDE_BRIDGE_PATH}: cannot inspect Claude bridge: {exc}")
+        return
+    if not stat.S_ISREG(info.st_mode):
+        errors.append(f"{CLAUDE_BRIDGE_PATH}: Claude bridge must be a regular file")
+        return
+    try:
+        content = bridge.read_bytes()
+    except OSError as exc:
+        errors.append(f"{CLAUDE_BRIDGE_PATH}: cannot read Claude bridge: {exc}")
+        return
+    if content != CLAUDE_BRIDGE_BYTES:
+        errors.append(f"{CLAUDE_BRIDGE_PATH}: exact bridge bytes mismatch")
 
 
 def check_manager_constants(errors: list[str], build_version: str | None) -> None:
@@ -2051,6 +2087,7 @@ def main() -> int:
     check_profiles(errors)
     check_setup_toolkit(errors)
     check_contracts(errors, build_version)
+    check_claude_bridge(errors)
     check_manager_constants(errors, build_version)
     check_no_production_test_switches(errors)
     check_runtime_lock_source(errors)

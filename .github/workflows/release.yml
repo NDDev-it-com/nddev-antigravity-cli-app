@@ -24,7 +24,7 @@ jobs:
       version: ${{ github.ref_name }}
       package_name: nddev-antigravity-cli-app
       archive_paths: >-
-        README.md LICENSE VERSION CHANGELOG.md SECURITY.md AGENTS.md .gitignore
+        README.md LICENSE VERSION CHANGELOG.md SECURITY.md AGENTS.md .claude .gitignore
         .gds .github build cli-tools config docs references profiles setups
       runtime_paths: >-
-        README.md LICENSE VERSION build cli-tools config references profiles setups
+        README.md LICENSE VERSION .claude build cli-tools config references profiles setups
