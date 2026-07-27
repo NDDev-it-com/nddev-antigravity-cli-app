@@ -50,6 +50,9 @@ MANAGED_PAYLOAD_MAX_BYTES = 1024 * 1024
 SOFTWARE_ARTIFACT_MAX_BYTES = 300 * 1024 * 1024
 CLI_VERSION = "1.1.7"
 CLI_COMMAND = "agy"
+UPSTREAM_CLI_MEMBER_NAMES = frozenset(
+    {CLI_COMMAND, "agy.exe", "antigravity", "antigravity.exe"}
+)
 RELEASE_BASE_URL = (
     "https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.7"
 )
@@ -802,7 +805,7 @@ def validate_archive_member_path(raw_name: str, label: str) -> Path:
 
 
 def is_cli_candidate(path: Path) -> bool:
-    return path.name in {CLI_COMMAND, "agy.exe"}
+    return path.name in UPSTREAM_CLI_MEMBER_NAMES
 
 
 def extract_cli_binary_from_tar(archive: bytes) -> bytes:

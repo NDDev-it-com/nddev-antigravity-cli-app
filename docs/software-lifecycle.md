@@ -21,10 +21,12 @@ SHA-256 plus size are pinned in `references/antigravity-cli-baseline.json`; npm
 and pip install paths are intentionally unsupported.
 
 The archive reader never extracts an archive wholesale. It reads exactly one
-regular `agy` or `agy.exe` member from the archive stream, rejects absolute,
-parent-traversal, Windows-drive, NUL, and leading-`//` paths, rejects tar
-symlinks, hardlinks, devices, and duplicate candidates, and requires zip
-candidates to be regular files by `external_attr`.
+regular upstream CLI member from the archive stream and installs it as
+target-owned `bin/agy`. Current official macOS archives publish that member as
+`antigravity`; older/current-compatible archives may publish `agy` or
+`agy.exe`. The reader rejects absolute, parent-traversal, Windows-drive, NUL,
+and leading-`//` paths, rejects tar symlinks, hardlinks, devices, and duplicate
+candidates, and requires zip candidates to be regular files by `external_attr`.
 
 ## Target layout and rollback
 
