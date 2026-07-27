@@ -1,6 +1,0 @@
-{
-  "allowNonWorkspaceAccess": false,
-  "artifactReviewPolicy": "agent-decides",
-  "enableTerminalSandbox": true,
-  "toolPermission": "proceed-in-sandbox"
-}

@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "id": "safe",
+  "description": "Review-gated Antigravity CLI profile with strict tools, artifact review, terminal sandboxing, no non-workspace access, unsandboxed denial, and documented ask selectors.",
+  "default": false
+}

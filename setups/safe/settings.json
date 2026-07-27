@@ -1,6 +1,0 @@
-{
-  "allowNonWorkspaceAccess": false,
-  "artifactReviewPolicy": "asks-for-review",
-  "enableTerminalSandbox": true,
-  "toolPermission": "strict"
-}

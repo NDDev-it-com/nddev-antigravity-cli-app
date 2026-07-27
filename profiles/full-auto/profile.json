@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "id": "full-auto",
+  "description": "Default non-interactive Antigravity CLI profile with always-proceed tools, direct artifact writes, no terminal sandbox, non-workspace access, and documented allow selectors.",
+  "default": true
+}

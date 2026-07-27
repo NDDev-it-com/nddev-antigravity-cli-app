@@ -1,44 +1,59 @@
 {
-  "schema_version": 1,
-  "verified_date": "2026-07-26",
+  "schema_version": 2,
+  "verified_date": "2026-07-27",
   "verified_version_ref": "build/version.json:antigravity_cli_tested",
   "release": {
     "tag": "1.1.7",
     "published_at": "2026-07-26T00:43:16Z",
     "url": "https://github.com/google-antigravity/antigravity-cli/releases/tag/1.1.7",
-    "assets": {
-      "agy_cli_linux_arm64.tar.gz": {
-        "size": 49049369,
-        "sha256": "0d6d488851745e80e69b8935d063e742945811b47111994b1a6dbd27df3010d5"
-      },
-      "agy_cli_linux_x64.tar.gz": {
-        "size": 52427182,
-        "sha256": "946cd06258d0ede72d0311550c914315798821f6a397f53ac760919826a19af4"
-      },
-      "agy_cli_mac_arm64.tar.gz": {
-        "size": 46174321,
-        "sha256": "1ed31957d30e2d9735b1ce545a1e9106233bf7ce07739ea1f883957f5d240bed"
-      },
-      "agy_cli_mac_x64.tar.gz": {
-        "size": 50435519,
-        "sha256": "67924f137f1ab884415fa5ab45de592d1d037eacb45be90f67d0bc6dd181498d"
-      },
-      "agy_cli_windows_arm64.zip": {
-        "size": 43825036,
-        "sha256": "2cc250e9ad7468df63b27063fd1ff126ca4644e97d0e377eca1f0445966dd60e"
-      },
-      "agy_cli_windows_x64.zip": {
-        "size": 47974201,
-        "sha256": "492717bd2906a3a25c500a98a4c5adf2ade89cea17dd56070f380261603af0e0"
-      }
-    }
+    "latest_api": "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest"
+  },
+  "install_script": {
+    "url": "https://antigravity.google/cli/install.sh",
+    "sha256": "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640",
+    "observed_flags": [
+      "--dir",
+      "--help"
+    ],
+    "default_target": "~/.local/bin/agy",
+    "staging_directory": "~/.cache/antigravity/staging",
+    "post_install_command": "agy install",
+    "nddev_execution": "not executed; manager performs target-owned manifest download and extraction"
   },
   "software_install": {
-    "mechanism": "official-github-release-artifact",
+    "mechanism": "official-antigravity-install-manifest",
     "managed_command": "bin/agy",
     "version": "1.1.7",
+    "manifest_url_template": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{platform}.json",
+    "manifest_fields": [
+      "version",
+      "url",
+      "sha512"
+    ],
     "npm": null,
     "pip": null
+  },
+  "platform_manifests": {
+    "darwin_amd64": {
+      "version": "1.1.7",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.7-5951805767680000/darwin-x64/cli_mac_x64.tar.gz",
+      "sha512": "40ab64cd0f25febd4f48762d3fab619c23f0b4af30d7c95a83ebd34a7ad37b346ca2cd7d593b5d60aeaf838acdf3ee061e747d7ca1398e5fad9ffc567781ba31"
+    },
+    "darwin_arm64": {
+      "version": "1.1.7",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.7-5951805767680000/darwin-arm/cli_mac_arm64.tar.gz",
+      "sha512": "712ff022a40616414b44a9044b09c7662a45b61fe5bada08bd00af97b66f1baa0a9374bb98137ed559e93a7499f8fa832d6558bfa37b20a9f612b5be245f31b7"
+    },
+    "linux_amd64": {
+      "version": "1.1.7",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.7-5951805767680000/linux-x64/cli_linux_x64.tar.gz",
+      "sha512": "720d5a7ff256aa5dd6712513cd5eb6fe031cf9e7523a33bcbda7755120ced53bb64ff985b402ce068e5895e0ffb348c2632545039a1dde6daad591f164d5852f"
+    },
+    "linux_arm64": {
+      "version": "1.1.7",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.7-5951805767680000/linux-arm/cli_linux_arm64.tar.gz",
+      "sha512": "6b42366c3926994785301af43e01f595c5b8e43eb521166d98478539368b0daafb3211000fb2280ade6a37da0a6c438ef28abc2c82b6c8263017b245878fc506"
+    }
   },
   "runtime": {
     "product": "Antigravity CLI",
@@ -55,37 +70,45 @@
     "sandbox": "https://antigravity.google/docs/cli/sandbox",
     "plugins": "https://antigravity.google/docs/cli/plugins",
     "skills": "https://antigravity.google/docs/skills",
+    "agents": "https://antigravity.google/docs/subagents",
     "rules": "https://antigravity.google/docs/rules-workflows",
-    "reference": "https://antigravity.google/docs/cli/reference"
+    "hooks": "https://antigravity.google/docs/hooks",
+    "mcp": "https://antigravity.google/docs/mcp",
+    "reference": "https://antigravity.google/docs/cli/reference",
+    "download": "https://antigravity.google/download"
   },
   "configuration": {
     "target_model": "isolated-home",
     "settings_file": "~/.gemini/antigravity-cli/settings.json",
     "keybindings_file": "~/.gemini/antigravity-cli/keybindings.json",
-    "plugin_root": "~/.gemini/antigravity-cli/plugins/",
+    "cli_plugin_root": "~/.gemini/antigravity-cli/plugins/",
+    "manual_global_plugin_root": "~/.gemini/config/plugins/",
+    "workspace_plugin_roots": [
+      ".agents/plugins/",
+      "_agents/plugins/"
+    ],
+    "workspace_skill_root": ".agents/skills/",
+    "global_skill_root": "~/.gemini/config/skills/",
+    "workspace_agents_root": ".agents/agents/",
+    "global_agents_root": "~/.gemini/config/agents/",
+    "workspace_hooks_file": ".agents/hooks.json",
+    "global_hooks_file": "~/.gemini/config/hooks.json",
+    "workspace_mcp_file": ".agents/mcp_config.json",
+    "global_mcp_file": "~/.gemini/config/mcp_config.json",
     "native_builder_projection": [
       "plugin.json",
-      "skills/nddev-builder/SKILL.md",
-      "agents/nddev-builder.md",
-      "rules/nddev-builder.md"
+      "skills/",
+      "agents/",
+      "rules/"
     ],
-    "marketplace": null
+    "marketplace": null,
+    "default_hooks": false,
+    "default_mcp_servers": false
   },
   "permissions": {
-    "settings_key": "toolPermission",
-    "artifact_review_key": "artifactReviewPolicy",
-    "sandbox_key": "enableTerminalSandbox",
-    "non_workspace_access_key": "allowNonWorkspaceAccess",
-    "tool_permission_values": [
-      "strict",
-      "request-review",
-      "proceed-in-sandbox",
-      "always-proceed"
-    ],
-    "artifact_review_values": [
-      "asks-for-review",
-      "agent-decides",
-      "always-proceed"
-    ]
+    "settings_file": "~/.gemini/antigravity-cli/settings.json",
+    "precedence": "deny > ask > allow",
+    "documented_selectors_ref": "profiles/<profile-id>/settings.json",
+    "profile_payload_owner": "profiles/"
   }
 }

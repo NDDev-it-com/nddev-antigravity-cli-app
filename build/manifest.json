@@ -1,21 +1,52 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "nddev-antigravity-cli-app",
-  "build_version": "0.1.0",
+  "build_version": "0.2.0",
   "entrypoint": "python3 cli-tools/nddev_antigravity_cli.py",
-  "source_root": "setups",
-  "setup_ids": [
-    "safe",
-    "balanced",
-    "full-auto"
-  ],
+  "source_roots": {
+    "setups": "setups",
+    "profiles": "profiles"
+  },
+  "setup_system": {
+    "content_setup_ids": [
+      "nddev-builder"
+    ],
+    "default_setup_id": "nddev-builder",
+    "permission_profile_ids": [
+      "full-auto",
+      "safe"
+    ],
+    "default_permission_profile_id": "full-auto",
+    "setup_option": "--setup <id>",
+    "profile_option": "--profile <id>",
+    "plan_mutates": false
+  },
   "managed_files": [
     ".gemini/antigravity-cli/settings.json",
     ".gemini/antigravity-cli/plugins/nddev-builder/plugin.json",
     ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/references/native-surfaces.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/references/source-owners.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/references/validation-workflows.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-config/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-permissions/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-agents/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-instructions/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-plugins/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-hooks/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-mcp/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-lifecycle/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-validation/SKILL.md",
     ".gemini/antigravity-cli/plugins/nddev-builder/agents/nddev-builder.md",
     ".gemini/antigravity-cli/plugins/nddev-builder/rules/nddev-builder.md",
     "NDDEV-ANTIGRAVITY-CLI-SETUP.json"
+  ],
+  "managed_settings_keys": [
+    "toolPermission",
+    "artifactReviewPolicy",
+    "enableTerminalSandbox",
+    "allowNonWorkspaceAccess",
+    "permissions"
   ],
   "builder": {
     "id": "nddev-builder",
@@ -28,9 +59,23 @@
       "agents",
       "rules"
     ],
+    "default_hooks": false,
+    "default_mcp_servers": false,
     "managed_files": [
       ".gemini/antigravity-cli/plugins/nddev-builder/plugin.json",
       ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/references/native-surfaces.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/references/source-owners.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/references/validation-workflows.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-config/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-permissions/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-agents/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-instructions/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-plugins/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-hooks/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-mcp/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-lifecycle/SKILL.md",
+      ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-validation/SKILL.md",
       ".gemini/antigravity-cli/plugins/nddev-builder/agents/nddev-builder.md",
       ".gemini/antigravity-cli/plugins/nddev-builder/rules/nddev-builder.md"
     ]
@@ -43,6 +88,7 @@
       "install",
       "apply",
       "switch",
+      "migrate",
       "restore",
       "remove",
       "software-status",
@@ -55,6 +101,7 @@
       "install",
       "apply",
       "switch",
+      "migrate",
       "restore",
       "remove",
       "software-status",
@@ -73,6 +120,7 @@
     "home_bound": true,
     "requires_clean_managed_target": true,
     "requires_current_target_owned_software": true,
+    "legacy_launch_denied": true,
     "path_fallback": false,
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
@@ -80,26 +128,45 @@
     "managed_override_args_blocked": [
       "--sandbox",
       "--dangerously-skip-permissions",
+      "--permission-mode",
       "--mode",
-      "--cwd"
+      "--cwd",
+      "--agent"
     ]
   },
   "software_install": {
     "supported": true,
-    "mechanism": "official-github-release-artifact",
+    "mechanism": "official-antigravity-install-manifest",
     "version": "1.1.7",
     "command": "agy",
+    "installer_url": "https://antigravity.google/cli/install.sh",
+    "installer_sha256": "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640",
+    "manifest_url_template": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{platform}.json",
+    "platform_manifest_ids": [
+      "darwin_amd64",
+      "darwin_arm64",
+      "linux_amd64",
+      "linux_arm64"
+    ],
     "status_command": "python3 cli-tools/nddev_antigravity_cli.py software-status --target <absolute-home-target> [--json]",
     "install_command": "python3 cli-tools/nddev_antigravity_cli.py install-cli --target <absolute-home-target> [--json]",
     "update_command": "python3 cli-tools/nddev_antigravity_cli.py update-cli --target <absolute-home-target> [--json]",
-    "status_fields": ["installed", "current", "drift"],
+    "status_fields": [
+      "installed",
+      "current",
+      "drift"
+    ],
     "install_precondition": "absent managed software",
     "update_precondition": "existing managed software",
     "update_current_behavior": "idempotent no-op without downloading",
     "stage_and_atomic_swap": true,
     "managed_command": "bin/agy",
     "layout": ".nddev-software/antigravity-cli/versions/1.1.7/",
-    "artifact_pin_fields": ["sha256", "size"],
+    "artifact_pin_fields": [
+      "version",
+      "url",
+      "sha512"
+    ],
     "npm": null,
     "pip": null
   },
@@ -107,6 +174,7 @@
     "location": "sibling .<target-name>.nddev-antigravity-cli-backups",
     "envelope": "NDDEV-ANTIGRAVITY-CLI-BACKUP.json",
     "slots": 10,
-    "canonical_target_bound": true
+    "canonical_target_bound": true,
+    "pool_lock": true
   }
 }

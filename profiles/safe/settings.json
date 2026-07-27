@@ -1,0 +1,19 @@
+{
+  "toolPermission": "strict",
+  "artifactReviewPolicy": "asks-for-review",
+  "enableTerminalSandbox": true,
+  "allowNonWorkspaceAccess": false,
+  "permissions": {
+    "deny": [
+      "unsandboxed(*)"
+    ],
+    "ask": [
+      "write_file(*)",
+      "read_url(*)",
+      "execute_url(*)",
+      "command(*)",
+      "mcp(*)"
+    ],
+    "allow": []
+  }
+}

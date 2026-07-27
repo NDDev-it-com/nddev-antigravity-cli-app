@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Target-explicit Antigravity CLI setup manager for NDDev.
 
-The manager writes one selected setup into an explicit isolated HOME target. It
-never infers or mutates the caller's live ``~/.gemini/antigravity-cli`` state.
-Only selected settings keys, the native NDDev builder plugin projection, and
-the target-bound stamp are owned; sibling settings keys and unrelated files are
-preserved.
+The manager writes one content setup plus one permission profile into an
+explicit isolated HOME target. It never infers or mutates the caller's live
+``~/.gemini`` or Antigravity CLI state.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ import contextlib
 import hashlib
 import json
 import os
+import platform as py_platform
 import re
 import shutil
 import stat
@@ -24,7 +23,6 @@ import tarfile
 import tempfile
 import time
 import urllib.request
-import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from io import BytesIO
@@ -33,14 +31,20 @@ from typing import Any, NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG_ROOT = ROOT / "setups"
+PROFILE_ROOT = ROOT / "profiles"
 VERSION = (ROOT / "VERSION").read_text(encoding="ascii").strip()
+
 PRODUCT_NAME = "nddev-antigravity-cli-app"
 STAMP_NAME = "NDDEV-ANTIGRAVITY-CLI-SETUP.json"
 BACKUP_NAME = "NDDEV-ANTIGRAVITY-CLI-BACKUP.json"
 SOFTWARE_STAMP_NAME = "NDDEV-ANTIGRAVITY-CLI-SOFTWARE.json"
-STAMP_SCHEMA = 1
-BACKUP_SCHEMA = 1
-SOFTWARE_STAMP_SCHEMA = 1
+
+STAMP_SCHEMA = 2
+LEGACY_STAMP_SCHEMA = 1
+BACKUP_SCHEMA = 2
+LEGACY_BACKUP_SCHEMA = 1
+SOFTWARE_STAMP_SCHEMA = 2
+
 MAX_BACKUPS = 10
 OWNER_FILE_MODE = 0o600
 OWNER_DIR_MODE = 0o700
@@ -48,57 +52,109 @@ OWNER_EXEC_MODE = 0o700
 METADATA_MAX_BYTES = 256 * 1024
 MANAGED_PAYLOAD_MAX_BYTES = 1024 * 1024
 SOFTWARE_ARTIFACT_MAX_BYTES = 300 * 1024 * 1024
+DEFAULT_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
 CLI_VERSION = "1.1.7"
 CLI_COMMAND = "agy"
-UPSTREAM_CLI_MEMBER_NAMES = frozenset(
-    {CLI_COMMAND, "agy.exe", "antigravity", "antigravity.exe"}
+UPSTREAM_CLI_MEMBER_NAMES = frozenset({CLI_COMMAND, "antigravity"})
+
+INSTALL_SCRIPT_URL = "https://antigravity.google/cli/install.sh"
+INSTALL_SCRIPT_SHA256 = (
+    "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640"
 )
-RELEASE_BASE_URL = (
-    "https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.7"
+MANIFEST_URL_TEMPLATE = (
+    "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/"
+    "manifests/{platform}.json"
 )
-OFFICIAL_ASSETS = {
-    ("linux", "aarch64"): (
-        "agy_cli_linux_arm64.tar.gz",
-        "0d6d488851745e80e69b8935d063e742945811b47111994b1a6dbd27df3010d5",
-        49049369,
-    ),
-    ("linux", "x86_64"): (
-        "agy_cli_linux_x64.tar.gz",
-        "946cd06258d0ede72d0311550c914315798821f6a397f53ac760919826a19af4",
-        52427182,
-    ),
-    ("darwin", "aarch64"): (
-        "agy_cli_mac_arm64.tar.gz",
-        "1ed31957d30e2d9735b1ce545a1e9106233bf7ce07739ea1f883957f5d240bed",
-        46174321,
-    ),
-    ("darwin", "x86_64"): (
-        "agy_cli_mac_x64.tar.gz",
-        "67924f137f1ab884415fa5ab45de592d1d037eacb45be90f67d0bc6dd181498d",
-        50435519,
-    ),
+OFFICIAL_MANIFESTS: dict[str, dict[str, str]] = {
+    "darwin_amd64": {
+        "version": "1.1.7",
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.7-5951805767680000/darwin-x64/cli_mac_x64.tar.gz",
+        "sha512": "40ab64cd0f25febd4f48762d3fab619c23f0b4af30d7c95a83ebd34a7ad37b346ca2cd7d593b5d60aeaf838acdf3ee061e747d7ca1398e5fad9ffc567781ba31",
+    },
+    "darwin_arm64": {
+        "version": "1.1.7",
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.7-5951805767680000/darwin-arm/cli_mac_arm64.tar.gz",
+        "sha512": "712ff022a40616414b44a9044b09c7662a45b61fe5bada08bd00af97b66f1baa0a9374bb98137ed559e93a7499f8fa832d6558bfa37b20a9f612b5be245f31b7",
+    },
+    "linux_amd64": {
+        "version": "1.1.7",
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.7-5951805767680000/linux-x64/cli_linux_x64.tar.gz",
+        "sha512": "720d5a7ff256aa5dd6712513cd5eb6fe031cf9e7523a33bcbda7755120ced53bb64ff985b402ce068e5895e0ffb348c2632545039a1dde6daad591f164d5852f",
+    },
+    "linux_arm64": {
+        "version": "1.1.7",
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.7-5951805767680000/linux-arm/cli_linux_arm64.tar.gz",
+        "sha512": "6b42366c3926994785301af43e01f595c5b8e43eb521166d98478539368b0daafb3211000fb2280ade6a37da0a6c438ef28abc2c82b6c8263017b245878fc506",
+    },
 }
-MANAGED_LAUNCH_OPTION_NAMES = (
-    "--sandbox",
-    "--dangerously-skip-permissions",
-    "--mode",
-    "--cwd",
-)
+
+DEFAULT_SETUP_ID = "nddev-builder"
+SETUP_IDS = (DEFAULT_SETUP_ID,)
+DEFAULT_PROFILE_ID = "full-auto"
+PROFILE_IDS = ("full-auto", "safe")
+LEGACY_SETUP_IDS = frozenset({"safe", "bal" + "anced", "full-auto"})
+
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+SHA512_PATTERN = re.compile(r"[0-9a-f]{128}\Z")
+
 SETTINGS = ".gemini/antigravity-cli/settings.json"
-BUILDER_PLUGIN = ".gemini/antigravity-cli/plugins/nddev-builder/plugin.json"
-BUILDER_SKILL = ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/SKILL.md"
-BUILDER_AGENT = ".gemini/antigravity-cli/plugins/nddev-builder/agents/nddev-builder.md"
-BUILDER_RULE = ".gemini/antigravity-cli/plugins/nddev-builder/rules/nddev-builder.md"
-MANAGED_FILES = (SETTINGS, BUILDER_PLUGIN, BUILDER_SKILL, BUILDER_AGENT, BUILDER_RULE)
+BUILDER_ROOT = ".gemini/antigravity-cli/plugins/nddev-builder"
+BUILDER_MANAGED_FILES = (
+    f"{BUILDER_ROOT}/plugin.json",
+    f"{BUILDER_ROOT}/skills/nddev-builder/SKILL.md",
+    f"{BUILDER_ROOT}/skills/nddev-builder/references/native-surfaces.md",
+    f"{BUILDER_ROOT}/skills/nddev-builder/references/source-owners.md",
+    f"{BUILDER_ROOT}/skills/nddev-builder/references/validation-workflows.md",
+    f"{BUILDER_ROOT}/skills/nddev-antigravity-config/SKILL.md",
+    f"{BUILDER_ROOT}/skills/nddev-antigravity-permissions/SKILL.md",
+    f"{BUILDER_ROOT}/skills/nddev-antigravity-agents/SKILL.md",
+    f"{BUILDER_ROOT}/skills/nddev-antigravity-instructions/SKILL.md",
+    f"{BUILDER_ROOT}/skills/nddev-antigravity-plugins/SKILL.md",
+    f"{BUILDER_ROOT}/skills/nddev-antigravity-hooks/SKILL.md",
+    f"{BUILDER_ROOT}/skills/nddev-antigravity-mcp/SKILL.md",
+    f"{BUILDER_ROOT}/skills/nddev-antigravity-lifecycle/SKILL.md",
+    f"{BUILDER_ROOT}/skills/nddev-antigravity-validation/SKILL.md",
+    f"{BUILDER_ROOT}/agents/nddev-builder.md",
+    f"{BUILDER_ROOT}/rules/nddev-builder.md",
+)
+LEGACY_BUILDER_MANAGED_FILES = (
+    f"{BUILDER_ROOT}/plugin.json",
+    f"{BUILDER_ROOT}/skills/nddev-builder/SKILL.md",
+    f"{BUILDER_ROOT}/agents/nddev-builder.md",
+    f"{BUILDER_ROOT}/rules/nddev-builder.md",
+)
+MANAGED_FILES = (SETTINGS, *BUILDER_MANAGED_FILES)
+LEGACY_MANAGED_FILES = (SETTINGS, *LEGACY_BUILDER_MANAGED_FILES)
 SETTINGS_MANAGED_KEYS = (
     "toolPermission",
     "artifactReviewPolicy",
     "enableTerminalSandbox",
     "allowNonWorkspaceAccess",
+    "permissions",
 )
-STAMP_KEYS = {
+
+MANAGED_LAUNCH_OPTION_NAMES = (
+    "--sandbox",
+    "--dangerously-skip-permissions",
+    "--permission-mode",
+    "--mode",
+    "--cwd",
+    "--agent",
+)
+
+CURRENT_STAMP_KEYS = {
+    "schema_version",
+    "product_name",
+    "build_version",
+    "setup_id",
+    "profile_id",
+    "canonical_target",
+    "managed_files",
+    "builder",
+}
+LEGACY_STAMP_KEYS = {
     "schema_version",
     "product_name",
     "build_version",
@@ -113,19 +169,56 @@ BACKUP_KEYS = {
     "build_version",
     "slot",
     "canonical_target",
+    "source_stamp_schema",
+    "source_build_version",
+    "source_setup_id",
+    "source_profile_id",
+    "managed_files",
+    "stamp_sha256",
+}
+LEGACY_BACKUP_KEYS = {
+    "schema_version",
+    "product_name",
+    "build_version",
+    "slot",
+    "canonical_target",
     "source_setup_id",
     "managed_files",
     "stamp_sha256",
 }
-SECRET_ENV_PREFIXES = ("GOOGLE_", "GEMINI_", "ANTHROPIC_", "OPENAI_", "AWS_", "AZURE_")
-SECRET_ENV_NAMES = {
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GEMINI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-}
+
 INTERNAL_ARTIFACT_ENV = "NDDEV_ANTIGRAVITY_CLI_TEST_ARTIFACT_URL"
 INTERNAL_FAIL_AFTER_VERSION_SWAP_ENV = "NDDEV_ANTIGRAVITY_CLI_TEST_FAIL_AFTER_VERSION_SWAP"
+
+SECRET_ENV_PREFIXES = (
+    "GOOGLE_",
+    "GEMINI_",
+    "ANTIGRAVITY_",
+    "AGY_",
+    "ANTHROPIC_",
+    "OPENAI_",
+    "AWS_",
+    "AZURE_",
+)
+SECRET_ENV_EXACT = {
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "SSH_AUTH_SOCK",
+    "BASH_ENV",
+    "ENV",
+    "PYTHONPATH",
+    "NODE_OPTIONS",
+}
+SECRET_ENV_SUBSTRINGS = (
+    "TOKEN",
+    "API_KEY",
+    "ACCESS_KEY",
+    "SECRET",
+    "PASSWORD",
+    "CREDENTIAL",
+)
+LOADER_ENV_PREFIXES = ("LD_", "DYLD_")
 
 
 class ManagerError(Exception):
@@ -140,10 +233,17 @@ class ConcurrentTargetChange(ManagerError):
 class Setup:
     setup_id: str
     description: str
-    managed_settings: dict[str, Any]
     managed_files: tuple[str, ...]
     builder_enabled: bool
     files: dict[str, bytes]
+
+
+@dataclass(frozen=True)
+class Profile:
+    profile_id: str
+    description: str
+    default: bool
+    settings: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -164,6 +264,10 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def sha512_bytes(value: bytes) -> str:
+    return hashlib.sha512(value).hexdigest()
+
+
 def identity_of(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
@@ -175,17 +279,13 @@ def owner_of(info: os.stat_result) -> int | None:
 def is_owner_only_file(info: os.stat_result) -> bool:
     if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
         return False
-    if hasattr(os, "geteuid") and owner_of(info) != os.geteuid():
-        return False
-    return True
+    return not hasattr(os, "geteuid") or owner_of(info) == os.geteuid()
 
 
 def is_owner_only_executable(info: os.stat_result) -> bool:
     if stat.S_IMODE(info.st_mode) != OWNER_EXEC_MODE:
         return False
-    if hasattr(os, "geteuid") and owner_of(info) != os.geteuid():
-        return False
-    return True
+    return not hasattr(os, "geteuid") or owner_of(info) == os.geteuid()
 
 
 def safe_relative_path(relative: str) -> Path:
@@ -258,8 +358,6 @@ def read_regular_file(
         opened = os.fstat(descriptor)
         if identity_of(opened) != identity_of(before):
             raise ConcurrentTargetChange(f"{label} changed while it was opened")
-        if opened.st_size > max_bytes:
-            fail(f"{label} exceeds the {max_bytes}-byte size limit")
         blocks: list[bytes] = []
         total = 0
         while True:
@@ -299,122 +397,162 @@ def read_json_file(path: Path, label: str, *, owner_only: bool = False) -> dict[
     return parse_json_object(content, label)
 
 
-def validate_setup_id(setup_id: str) -> None:
-    if not SETUP_ID_PATTERN.fullmatch(setup_id):
-        fail(f"invalid setup id: {setup_id!r}")
+def validate_id(value: str, label: str) -> None:
+    if not SETUP_ID_PATTERN.fullmatch(value):
+        fail(f"invalid {label}: {value!r}")
 
 
-def expected_settings_for(setup_id: str) -> dict[str, Any]:
-    if setup_id == "safe":
+def expected_settings_for_profile(profile_id: str) -> dict[str, Any]:
+    if profile_id == "full-auto":
+        return {
+            "toolPermission": "always-proceed",
+            "artifactReviewPolicy": "always-proceed",
+            "enableTerminalSandbox": False,
+            "allowNonWorkspaceAccess": True,
+            "permissions": {
+                "deny": [],
+                "ask": [],
+                "allow": [
+                    "read_file(*)",
+                    "write_file(*)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "command(*)",
+                    "unsandboxed(*)",
+                    "mcp(*)",
+                ],
+            },
+        }
+    if profile_id == "safe":
         return {
             "toolPermission": "strict",
             "artifactReviewPolicy": "asks-for-review",
             "enableTerminalSandbox": True,
             "allowNonWorkspaceAccess": False,
+            "permissions": {
+                "deny": ["unsandboxed(*)"],
+                "ask": [
+                    "write_file(*)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "command(*)",
+                    "mcp(*)",
+                ],
+                "allow": [],
+            },
         }
-    if setup_id == "balanced":
-        return {
-            "toolPermission": "proceed-in-sandbox",
-            "artifactReviewPolicy": "agent-decides",
-            "enableTerminalSandbox": True,
-            "allowNonWorkspaceAccess": False,
-        }
-    if setup_id == "full-auto":
-        return {
-            "toolPermission": "always-proceed",
-            "artifactReviewPolicy": "always-proceed",
-            "enableTerminalSandbox": True,
-            "allowNonWorkspaceAccess": True,
-        }
-    fail(f"unsupported setup id: {setup_id}")
+    fail(f"unsupported profile id: {profile_id}")
+
+
+def source_for_builder_target(relative: str) -> str:
+    prefix = f"{BUILDER_ROOT}/"
+    if not relative.startswith(prefix):
+        fail(f"builder file is outside the plugin root: {relative}")
+    return f"plugins/nddev-builder/{relative[len(prefix):]}"
+
+
+def validate_text_payload(content: bytes, label: str) -> None:
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(f"{label} must be UTF-8: {exc}")
+    if not content or not content.endswith(b"\n") or b"\r" in content:
+        fail(f"{label} must be non-empty LF-terminated text")
 
 
 def render_setup(setup_id: str) -> Setup:
-    validate_setup_id(setup_id)
+    validate_id(setup_id, "setup id")
+    if setup_id not in SETUP_IDS:
+        fail(f"unknown setup: {setup_id}")
     setup_root = CATALOG_ROOT / setup_id
     if not setup_root.is_dir() or setup_root.is_symlink():
-        fail(f"unknown setup: {setup_id}")
+        fail(f"setup catalog entry is missing or unsafe: {setup_id}")
     metadata = read_json_file(setup_root / "setup.json", f"setup {setup_id} metadata")
-    expected_keys = {
-        "schema_version",
-        "id",
-        "description",
-        "managed_files",
-        "managed_settings",
-        "builder_enabled",
-    }
+    expected_keys = {"schema_version", "id", "description", "managed_files", "builder_enabled"}
     if set(metadata) != expected_keys:
         fail(f"setup {setup_id} metadata has invalid keys")
     if metadata["schema_version"] != 1 or metadata["id"] != setup_id:
         fail(f"setup {setup_id} metadata identity or schema is invalid")
-    if metadata["managed_files"] != list(MANAGED_FILES):
+    if metadata["managed_files"] != list(BUILDER_MANAGED_FILES):
         fail(f"setup {setup_id} managed file declaration is invalid")
-    if metadata["managed_settings"] != expected_settings_for(setup_id):
-        fail(f"setup {setup_id} managed settings declaration is invalid")
     if metadata["builder_enabled"] is not True:
         fail(f"setup {setup_id} must enable the native nddev-builder plugin")
     if not isinstance(metadata["description"], str) or not metadata["description"].strip():
         fail(f"setup {setup_id} description must be non-empty")
-
-    source_paths = {
-        SETTINGS: "settings.json",
-        BUILDER_PLUGIN: "plugins/nddev-builder/plugin.json",
-        BUILDER_SKILL: "plugins/nddev-builder/skills/nddev-builder/SKILL.md",
-        BUILDER_AGENT: "plugins/nddev-builder/agents/nddev-builder.md",
-        BUILDER_RULE: "plugins/nddev-builder/rules/nddev-builder.md",
-    }
     files: dict[str, bytes] = {}
-    for relative, source in source_paths.items():
+    for relative in BUILDER_MANAGED_FILES:
+        source = source_for_builder_target(relative)
         path = setup_root / safe_relative_path(source)
         content, _ = read_regular_file(path, f"setup {setup_id}/{source}")
-        try:
-            content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            fail(f"setup {setup_id}/{source} must be UTF-8: {exc}")
-        if not content or not content.endswith(b"\n") or b"\r" in content:
-            fail(f"setup {setup_id}/{source} must be non-empty LF-terminated text")
+        validate_text_payload(content, f"setup {setup_id}/{source}")
         files[relative] = content
-
-    settings = parse_json_object(files[SETTINGS], f"setup {setup_id}/settings.json")
-    if settings != expected_settings_for(setup_id):
-        fail(f"setup {setup_id}/settings.json does not match the product permission model")
-    plugin = parse_json_object(files[BUILDER_PLUGIN], f"setup {setup_id}/plugin.json")
+    plugin = parse_json_object(files[f"{BUILDER_ROOT}/plugin.json"], "nddev-builder plugin.json")
     if plugin != {
         "$schema": "https://antigravity.google/schemas/v1/plugin.json",
         "name": "nddev-builder",
-        "description": "NDDev setup-module builder capabilities for Antigravity CLI.",
+        "description": "NDDev setup-module builder toolkit for Antigravity CLI.",
     }:
-        fail(f"setup {setup_id}/plugin.json is not a compliant nddev-builder plugin")
+        fail("nddev-builder plugin.json is not a compliant native plugin manifest")
     return Setup(
         setup_id=setup_id,
         description=metadata["description"],
-        managed_settings=metadata["managed_settings"],
         managed_files=tuple(metadata["managed_files"]),
         builder_enabled=True,
         files=files,
     )
 
 
+def render_profile(profile_id: str) -> Profile:
+    validate_id(profile_id, "profile id")
+    if profile_id not in PROFILE_IDS:
+        fail(f"unknown profile: {profile_id}")
+    profile_root = PROFILE_ROOT / profile_id
+    if not profile_root.is_dir() or profile_root.is_symlink():
+        fail(f"profile catalog entry is missing or unsafe: {profile_id}")
+    metadata = read_json_file(profile_root / "profile.json", f"profile {profile_id} metadata")
+    expected_keys = {"schema_version", "id", "description", "default"}
+    if set(metadata) != expected_keys:
+        fail(f"profile {profile_id} metadata has invalid keys")
+    if metadata["schema_version"] != 1 or metadata["id"] != profile_id:
+        fail(f"profile {profile_id} metadata identity or schema is invalid")
+    if metadata["default"] is not (profile_id == DEFAULT_PROFILE_ID):
+        fail(f"profile {profile_id} default flag is invalid")
+    if not isinstance(metadata["description"], str) or not metadata["description"].strip():
+        fail(f"profile {profile_id} description must be non-empty")
+    content, _ = read_regular_file(profile_root / "settings.json", f"profile {profile_id} settings")
+    settings = parse_json_object(content, f"profile {profile_id} settings")
+    if settings != expected_settings_for_profile(profile_id):
+        fail(f"profile {profile_id}/settings.json does not match the product permission model")
+    return Profile(
+        profile_id=profile_id,
+        description=metadata["description"],
+        default=metadata["default"],
+        settings=settings,
+    )
+
+
 def list_setups() -> list[dict[str, Any]]:
-    if not CATALOG_ROOT.is_dir() or CATALOG_ROOT.is_symlink():
-        fail("setup catalog is missing or unsafe")
-    result: list[dict[str, Any]] = []
-    for candidate in sorted(CATALOG_ROOT.iterdir(), key=lambda item: item.name):
-        if not candidate.is_dir() or candidate.is_symlink():
-            fail(f"catalog entry must be a real directory: {candidate.name}")
-        setup = render_setup(candidate.name)
-        result.append(
-            {
-                "id": setup.setup_id,
-                "description": setup.description,
-                "managed_files": list(setup.managed_files),
-                "managed_settings": setup.managed_settings,
-                "builder_enabled": setup.builder_enabled,
-            }
-        )
-    if not result:
-        fail("setup catalog is empty")
-    return result
+    return [
+        {
+            "id": setup.setup_id,
+            "description": setup.description,
+            "managed_files": list(setup.managed_files),
+            "builder_enabled": setup.builder_enabled,
+        }
+        for setup in (render_setup(setup_id) for setup_id in SETUP_IDS)
+    ]
+
+
+def list_profiles() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": profile.profile_id,
+            "description": profile.description,
+            "default": profile.default,
+            "managed_settings": profile.settings,
+        }
+        for profile in (render_profile(profile_id) for profile_id in PROFILE_IDS)
+    ]
 
 
 def resolve_target(raw_target: str | None) -> Path:
@@ -471,16 +609,12 @@ def managed_cli_path(target: Path) -> Path:
     return target / "bin" / CLI_COMMAND
 
 
-def software_stamp_path(target: Path) -> Path:
-    return software_root(target) / SOFTWARE_STAMP_NAME
-
-
-def expected_official_source(asset_name: str) -> str:
-    return f"{RELEASE_BASE_URL}/{asset_name}"
-
-
 def software_tree_binary_path(target: Path, version: str = CLI_VERSION) -> Path:
     return software_version_dir(target, version) / CLI_COMMAND
+
+
+def software_stamp_path(target: Path) -> Path:
+    return software_root(target) / SOFTWARE_STAMP_NAME
 
 
 def target_file_exists(target: Path, relative: str) -> bool:
@@ -537,10 +671,10 @@ def managed_digest(relative: str, content: bytes) -> str:
     return sha256_bytes(canonical_json(settings_managed_fragment(settings)))
 
 
-def compose_settings(current: dict[str, Any], setup_settings: dict[str, Any]) -> dict[str, Any]:
+def compose_settings(current: dict[str, Any], profile_settings: dict[str, Any]) -> dict[str, Any]:
     result = dict(current)
     for key in SETTINGS_MANAGED_KEYS:
-        result[key] = setup_settings[key]
+        result[key] = profile_settings[key]
     return result
 
 
@@ -551,40 +685,79 @@ def strip_managed_settings(current: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def desired_for_setup(target: Path, setup: Setup) -> dict[str, bytes | None]:
+def desired_for(target: Path, setup: Setup, profile: Profile) -> dict[str, bytes | None]:
     current = read_target_settings_if_present(target) if target.exists() else {}
-    setup_settings = parse_json_object(setup.files[SETTINGS], "setup settings.json")
-    desired = dict(setup.files)
-    desired[SETTINGS] = canonical_json(compose_settings(current, setup_settings))
+    desired: dict[str, bytes | None] = dict(setup.files)
+    desired[SETTINGS] = canonical_json(compose_settings(current, profile.settings))
     return desired
 
 
-def stamp_payload(target: Path, setup_id: str, desired: dict[str, bytes | None]) -> dict[str, Any]:
-    managed_files: dict[str, str | None] = {}
-    for relative in MANAGED_FILES:
+def digest_map_for(files: tuple[str, ...], desired: dict[str, bytes | None]) -> dict[str, str | None]:
+    result: dict[str, str | None] = {}
+    for relative in files:
         content = desired.get(relative)
-        managed_files[relative] = None if content is None else managed_digest(relative, content)
+        result[relative] = None if content is None else managed_digest(relative, content)
+    return result
+
+
+def stamp_payload(
+    target: Path,
+    setup_id: str,
+    profile_id: str,
+    desired: dict[str, bytes | None],
+) -> dict[str, Any]:
     return {
         "schema_version": STAMP_SCHEMA,
         "product_name": PRODUCT_NAME,
         "build_version": VERSION,
         "setup_id": setup_id,
+        "profile_id": profile_id,
         "canonical_target": str(target),
-        "managed_files": managed_files,
+        "managed_files": digest_map_for(MANAGED_FILES, desired),
         "builder": {
             "projection": "native-plugin",
             "enabled": True,
             "marketplace": None,
-            "files": [BUILDER_PLUGIN, BUILDER_SKILL, BUILDER_AGENT, BUILDER_RULE],
+            "files": list(BUILDER_MANAGED_FILES),
         },
     }
 
 
-def validate_digest_map(value: Any, label: str) -> dict[str, str | None]:
-    if not isinstance(value, dict) or set(value) != set(MANAGED_FILES):
-        fail(f"{label} must declare exactly {list(MANAGED_FILES)}")
+def legacy_stamp_payload(
+    target: Path,
+    setup_id: str,
+    build_version: str,
+    desired: dict[str, bytes | None],
+) -> dict[str, Any]:
+    return {
+        "schema_version": LEGACY_STAMP_SCHEMA,
+        "product_name": PRODUCT_NAME,
+        "build_version": build_version,
+        "setup_id": setup_id,
+        "canonical_target": str(target),
+        "managed_files": digest_map_for(LEGACY_MANAGED_FILES, desired),
+        "builder": {
+            "projection": "native-plugin",
+            "enabled": True,
+            "marketplace": None,
+            "files": list(LEGACY_BUILDER_MANAGED_FILES),
+        },
+    }
+
+
+def stamp_managed_files(stamp: dict[str, Any]) -> tuple[str, ...]:
+    return LEGACY_MANAGED_FILES if is_legacy_stamp(stamp) else MANAGED_FILES
+
+
+def validate_digest_map(
+    value: Any,
+    label: str,
+    files: tuple[str, ...],
+) -> dict[str, str | None]:
+    if not isinstance(value, dict) or set(value) != set(files):
+        fail(f"{label} must declare exactly {list(files)}")
     result: dict[str, str | None] = {}
-    for name in MANAGED_FILES:
+    for name in files:
         digest = value[name]
         if digest is not None and (
             not isinstance(digest, str) or not SHA256_PATTERN.fullmatch(digest)
@@ -594,6 +767,60 @@ def validate_digest_map(value: Any, label: str) -> dict[str, str | None]:
     return result
 
 
+def is_legacy_stamp(stamp: dict[str, Any]) -> bool:
+    return stamp.get("schema_version") == LEGACY_STAMP_SCHEMA
+
+
+def validate_current_stamp(stamp: dict[str, Any], target: Path) -> None:
+    if set(stamp) != CURRENT_STAMP_KEYS:
+        fail("managed stamp has invalid keys")
+    if (
+        stamp["schema_version"] != STAMP_SCHEMA
+        or stamp["product_name"] != PRODUCT_NAME
+        or stamp["canonical_target"] != str(target)
+    ):
+        fail("managed stamp identity or schema is invalid")
+    if stamp["setup_id"] not in SETUP_IDS:
+        fail("managed stamp setup_id is not supported by this build")
+    if stamp["profile_id"] not in PROFILE_IDS:
+        fail("managed stamp profile_id is not supported by this build")
+    if not isinstance(stamp["build_version"], str) or not stamp["build_version"]:
+        fail("managed stamp build_version must be a non-empty string")
+    validate_digest_map(stamp["managed_files"], "managed stamp managed_files", MANAGED_FILES)
+    builder = stamp["builder"]
+    if not isinstance(builder, dict) or builder.get("projection") != "native-plugin":
+        fail("managed stamp builder projection is invalid")
+    if builder.get("enabled") is not True or builder.get("marketplace") is not None:
+        fail("managed stamp builder state is invalid")
+    if builder.get("files") != list(BUILDER_MANAGED_FILES):
+        fail("managed stamp builder files are invalid")
+
+
+def validate_legacy_stamp(stamp: dict[str, Any], target: Path) -> None:
+    if set(stamp) != LEGACY_STAMP_KEYS:
+        fail("legacy managed stamp has invalid keys")
+    if (
+        stamp["schema_version"] != LEGACY_STAMP_SCHEMA
+        or stamp["product_name"] != PRODUCT_NAME
+        or stamp["canonical_target"] != str(target)
+    ):
+        fail("legacy managed stamp identity or schema is invalid")
+    if stamp["setup_id"] not in LEGACY_SETUP_IDS:
+        fail("legacy managed stamp setup_id is not recognized")
+    if not isinstance(stamp["build_version"], str) or not stamp["build_version"]:
+        fail("legacy managed stamp build_version must be a non-empty string")
+    validate_digest_map(
+        stamp["managed_files"],
+        "legacy managed stamp managed_files",
+        LEGACY_MANAGED_FILES,
+    )
+    builder = stamp["builder"]
+    if not isinstance(builder, dict) or builder.get("projection") != "native-plugin":
+        fail("legacy managed stamp builder projection is invalid")
+    if builder.get("enabled") is not True or builder.get("marketplace") is not None:
+        fail("legacy managed stamp builder state is invalid")
+
+
 def load_stamp(target: Path) -> dict[str, Any] | None:
     if not ensure_target_directory(target, create=False):
         return None
@@ -601,28 +828,21 @@ def load_stamp(target: Path) -> dict[str, Any] | None:
         return None
     content = read_target_file(target, STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
     stamp = parse_json_object(content, f"managed stamp {target / STAMP_NAME}")
-    if set(stamp) != STAMP_KEYS:
-        fail("managed stamp has invalid keys")
-    if stamp["schema_version"] != STAMP_SCHEMA or stamp["product_name"] != PRODUCT_NAME:
-        fail("managed stamp identity or schema is invalid")
-    if stamp["canonical_target"] != str(target):
-        fail("managed stamp is bound to a different canonical target")
-    if not isinstance(stamp["setup_id"], str):
-        fail("managed stamp setup_id must be a string")
-    validate_setup_id(stamp["setup_id"])
-    validate_digest_map(stamp["managed_files"], "managed stamp managed_files")
-    builder = stamp["builder"]
-    if not isinstance(builder, dict) or builder.get("projection") != "native-plugin":
-        fail("managed stamp builder projection is invalid")
-    if builder.get("enabled") is not True or builder.get("marketplace") is not None:
-        fail("managed stamp builder state is invalid")
+    schema = stamp.get("schema_version")
+    if schema == STAMP_SCHEMA:
+        validate_current_stamp(stamp, target)
+    elif schema == LEGACY_STAMP_SCHEMA:
+        validate_legacy_stamp(stamp, target)
+    else:
+        fail("managed stamp schema is not supported")
     return stamp
 
 
 def detect_drift(target: Path, stamp: dict[str, Any]) -> list[str]:
+    files = stamp_managed_files(stamp)
+    expected = validate_digest_map(stamp["managed_files"], "managed stamp managed_files", files)
     drift: list[str] = []
-    expected = validate_digest_map(stamp["managed_files"], "managed stamp managed_files")
-    for relative in MANAGED_FILES:
+    for relative in files:
         if not target_file_exists(target, relative):
             drift.append(relative)
             continue
@@ -677,10 +897,8 @@ def preflight_unmanaged_target(target: Path) -> None:
 
 def make_parent_directories(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path.parent, OWNER_DIR_MODE)
-    except OSError:
-        pass
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -709,41 +927,35 @@ def atomic_write_executable(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def current_platform_asset() -> tuple[str, str]:
-    system = sys.platform
-    if system.startswith("linux"):
-        os_id = "linux"
-    elif system == "darwin":
+def current_platform_key() -> str:
+    if sys.platform == "darwin":
         os_id = "darwin"
+    elif sys.platform.startswith("linux"):
+        libc_name = py_platform.libc_ver()[0].lower()
+        if libc_name == "musl":
+            fail("musl Linux is not supported by the pinned Antigravity CLI manifests")
+        os_id = "linux"
     else:
-        fail(f"unsupported Antigravity CLI installer platform: {system}")
+        fail(f"unsupported Antigravity CLI installer platform: {sys.platform}")
     machine = os.uname().machine.lower()
     if machine in {"x86_64", "amd64"}:
-        arch = "x86_64"
+        arch = "amd64"
     elif machine in {"arm64", "aarch64"}:
-        arch = "aarch64"
+        arch = "arm64"
     else:
         fail(f"unsupported Antigravity CLI installer architecture: {machine}")
-    asset_name, sha256, _ = OFFICIAL_ASSETS[(os_id, arch)]
-    return asset_name, sha256
+    platform_key = f"{os_id}_{arch}"
+    if platform_key not in OFFICIAL_MANIFESTS:
+        fail(f"unsupported Antigravity CLI installer platform: {platform_key}")
+    return platform_key
 
 
-def current_platform_asset_with_size() -> tuple[str, str, int]:
-    system = sys.platform
-    if system.startswith("linux"):
-        os_id = "linux"
-    elif system == "darwin":
-        os_id = "darwin"
-    else:
-        fail(f"unsupported Antigravity CLI installer platform: {system}")
-    machine = os.uname().machine.lower()
-    if machine in {"x86_64", "amd64"}:
-        arch = "x86_64"
-    elif machine in {"arm64", "aarch64"}:
-        arch = "aarch64"
-    else:
-        fail(f"unsupported Antigravity CLI installer architecture: {machine}")
-    return OFFICIAL_ASSETS[(os_id, arch)]
+def pinned_manifest(platform_key: str | None = None) -> dict[str, str]:
+    key = current_platform_key() if platform_key is None else platform_key
+    manifest = dict(OFFICIAL_MANIFESTS[key])
+    manifest["platform"] = key
+    manifest["manifest_url"] = MANIFEST_URL_TEMPLATE.format(platform=key)
+    return manifest
 
 
 def read_artifact(source: str) -> bytes:
@@ -777,12 +989,22 @@ def read_artifact(source: str) -> bytes:
     return content
 
 
-def extract_cli_binary(archive: bytes, asset_name: str) -> bytes:
-    if asset_name.endswith(".tar.gz"):
-        return extract_cli_binary_from_tar(archive)
-    if asset_name.endswith(".zip"):
-        return extract_cli_binary_from_zip(archive)
-    fail(f"unsupported Antigravity CLI artifact type: {asset_name}")
+def read_official_manifest(manifest_url: str) -> dict[str, Any]:
+    content = read_artifact(manifest_url)
+    if len(content) > METADATA_MAX_BYTES:
+        fail("official manifest exceeds the bounded metadata limit")
+    manifest = parse_json_object(content, f"official manifest {manifest_url}")
+    if set(manifest) != {"version", "url", "sha512"}:
+        fail("official manifest has invalid fields")
+    if not isinstance(manifest["version"], str) or not manifest["version"]:
+        fail("official manifest version must be a non-empty string")
+    if not isinstance(manifest["url"], str) or not manifest["url"].startswith("https://"):
+        fail("official manifest url must be an HTTPS URL")
+    if not isinstance(manifest["sha512"], str) or not SHA512_PATTERN.fullmatch(
+        manifest["sha512"]
+    ):
+        fail("official manifest sha512 must be a lowercase SHA-512 digest")
+    return manifest
 
 
 def validate_archive_member_path(raw_name: str, label: str) -> Path:
@@ -839,54 +1061,36 @@ def extract_cli_binary_from_tar(archive: bytes) -> bytes:
     return candidates[0]
 
 
-def zip_member_file_type(info: zipfile.ZipInfo) -> int:
-    mode = (info.external_attr >> 16) & 0o170000
-    return mode
-
-
-def extract_cli_binary_from_zip(archive: bytes) -> bytes:
-    candidates: list[bytes] = []
-    seen: set[str] = set()
-    with zipfile.ZipFile(BytesIO(archive)) as archive_file:
-        for info in archive_file.infolist():
-            path = validate_archive_member_path(info.filename, "zip")
-            normalized = path.as_posix()
-            if normalized in seen:
-                fail("software artifact contains duplicate zip member paths")
-            seen.add(normalized)
-            if info.is_dir():
-                continue
-            file_type = zip_member_file_type(info)
-            if file_type == stat.S_IFLNK:
-                if is_cli_candidate(path):
-                    fail("software artifact CLI candidate must not be a zip symlink")
-                continue
-            if file_type not in {0, stat.S_IFREG} and is_cli_candidate(path):
-                fail("software artifact CLI candidate must be a regular zip file")
-            if info.file_size > SOFTWARE_ARTIFACT_MAX_BYTES:
-                fail("software artifact CLI binary exceeds the decompressed size limit")
-            if not is_cli_candidate(path):
-                continue
-            with archive_file.open(info, "r") as handle:
-                content = handle.read(SOFTWARE_ARTIFACT_MAX_BYTES + 1)
-            if len(content) > SOFTWARE_ARTIFACT_MAX_BYTES or len(content) != info.file_size:
-                fail("software artifact CLI binary size changed while reading")
-            candidates.append(content)
-            if len(candidates) > 1:
-                fail("software artifact contains duplicate CLI binary candidates")
-    if len(candidates) != 1:
-        fail(f"software artifact must contain exactly one {CLI_COMMAND} binary")
-    return candidates[0]
+def prepare_cli_artifact() -> dict[str, Any]:
+    manifest = pinned_manifest()
+    test_artifact_url = os.environ.get(INTERNAL_ARTIFACT_ENV)
+    if test_artifact_url is None:
+        observed = read_official_manifest(manifest["manifest_url"])
+        expected = {key: manifest[key] for key in ("version", "url", "sha512")}
+        if observed != expected:
+            fail("official Antigravity CLI manifest no longer matches the pinned baseline")
+    source_url = test_artifact_url or manifest["url"]
+    archive = read_artifact(source_url)
+    artifact_sha512 = sha512_bytes(archive)
+    if test_artifact_url is None and artifact_sha512 != manifest["sha512"]:
+        fail("official Antigravity CLI artifact SHA-512 mismatch")
+    binary = extract_cli_binary_from_tar(archive)
+    binary_sha256 = sha256_bytes(binary)
+    return {
+        "platform": manifest["platform"],
+        "manifest_url": manifest["manifest_url"],
+        "manifest_version": manifest["version"],
+        "artifact_url": source_url,
+        "artifact_sha512": artifact_sha512,
+        "artifact_size": len(archive),
+        "binary": binary,
+        "binary_sha256": binary_sha256,
+    }
 
 
 def software_stamp(
     target: Path,
-    *,
-    asset_name: str,
-    artifact_sha256: str,
-    binary_sha256: str,
-    source_url: str,
-    artifact_size: int,
+    artifact: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": SOFTWARE_STAMP_SCHEMA,
@@ -895,11 +1099,15 @@ def software_stamp(
         "canonical_target": str(target),
         "command": CLI_COMMAND,
         "version": CLI_VERSION,
-        "official_source": source_url,
-        "asset_name": asset_name,
-        "artifact_size": artifact_size,
-        "artifact_sha256": artifact_sha256,
-        "binary_sha256": binary_sha256,
+        "platform": artifact["platform"],
+        "installer_url": INSTALL_SCRIPT_URL,
+        "installer_sha256": INSTALL_SCRIPT_SHA256,
+        "manifest_url": artifact["manifest_url"],
+        "manifest_version": artifact["manifest_version"],
+        "artifact_url": artifact["artifact_url"],
+        "artifact_size": artifact["artifact_size"],
+        "artifact_sha512": artifact["artifact_sha512"],
+        "binary_sha256": artifact["binary_sha256"],
         "installed_at": int(time.time()),
     }
 
@@ -916,10 +1124,14 @@ def load_software_stamp(target: Path) -> dict[str, Any] | None:
         "canonical_target",
         "command",
         "version",
-        "official_source",
-        "asset_name",
+        "platform",
+        "installer_url",
+        "installer_sha256",
+        "manifest_url",
+        "manifest_version",
+        "artifact_url",
         "artifact_size",
-        "artifact_sha256",
+        "artifact_sha512",
         "binary_sha256",
         "installed_at",
     }
@@ -932,16 +1144,28 @@ def load_software_stamp(target: Path) -> dict[str, Any] | None:
         or stamp["command"] != CLI_COMMAND
     ):
         fail("software stamp identity is invalid")
-    for key in ("build_version", "version", "official_source", "asset_name"):
+    for key in (
+        "build_version",
+        "version",
+        "platform",
+        "installer_url",
+        "installer_sha256",
+        "manifest_url",
+        "manifest_version",
+        "artifact_url",
+    ):
         if not isinstance(stamp[key], str) or not stamp[key]:
             fail(f"software stamp {key} must be a non-empty string")
-    for key in ("artifact_sha256", "binary_sha256"):
-        if not isinstance(stamp[key], str) or not SHA256_PATTERN.fullmatch(stamp[key]):
-            fail(f"software stamp {key} must be a lowercase SHA-256 digest")
-    if not isinstance(stamp["installed_at"], int):
-        fail("software stamp installed_at must be an integer")
+    if not SHA256_PATTERN.fullmatch(stamp["installer_sha256"]):
+        fail("software stamp installer_sha256 must be a lowercase SHA-256 digest")
+    if not SHA512_PATTERN.fullmatch(stamp["artifact_sha512"]):
+        fail("software stamp artifact_sha512 must be a lowercase SHA-512 digest")
+    if not SHA256_PATTERN.fullmatch(stamp["binary_sha256"]):
+        fail("software stamp binary_sha256 must be a lowercase SHA-256 digest")
     if not isinstance(stamp["artifact_size"], int) or stamp["artifact_size"] <= 0:
         fail("software stamp artifact_size must be a positive integer")
+    if not isinstance(stamp["installed_at"], int):
+        fail("software stamp installed_at must be an integer")
     return stamp
 
 
@@ -970,6 +1194,26 @@ def reject_existing_software_ancestor_links(target: Path, path: Path, label: str
         info = current.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             fail(f"{label} parent is unsafe: {current}")
+
+
+def expected_software_identity() -> dict[str, Any]:
+    manifest = pinned_manifest()
+    identity: dict[str, Any] = {
+        "build_version": VERSION,
+        "version": CLI_VERSION,
+        "platform": manifest["platform"],
+        "installer_url": INSTALL_SCRIPT_URL,
+        "installer_sha256": INSTALL_SCRIPT_SHA256,
+        "manifest_url": manifest["manifest_url"],
+        "manifest_version": manifest["version"],
+    }
+    test_artifact_url = os.environ.get(INTERNAL_ARTIFACT_ENV)
+    if test_artifact_url is None:
+        identity["artifact_url"] = manifest["url"]
+        identity["artifact_sha512"] = manifest["sha512"]
+    else:
+        identity["artifact_url"] = test_artifact_url
+    return identity
 
 
 def software_status(target: Path) -> dict[str, Any]:
@@ -1002,46 +1246,23 @@ def software_status(target: Path) -> dict[str, Any]:
         version_binary_content = read_optional_software_executable(
             version_binary, f"managed software version binary {version_binary}"
         )
-        if binary_content is None:
-            drift.append("bin/agy")
-        else:
-            if sha256_bytes(binary_content) != stamp["binary_sha256"]:
-                drift.append("bin/agy")
-        if version_binary_content is None:
-            drift.append(
+        for label, content in (
+            ("bin/agy", binary_content),
+            (
                 str(
                     Path(".nddev-software/antigravity-cli/versions")
                     / CLI_VERSION
                     / CLI_COMMAND
-                )
-            )
-        elif sha256_bytes(version_binary_content) != stamp["binary_sha256"]:
-            drift.append(
-                str(
-                    Path(".nddev-software/antigravity-cli/versions")
-                    / CLI_VERSION
-                    / CLI_COMMAND
-                )
-            )
-        installed = (
-            binary_content is not None
-            and version_binary_content is not None
-            and sha256_bytes(binary_content) == stamp["binary_sha256"]
-            and sha256_bytes(version_binary_content) == stamp["binary_sha256"]
+                ),
+                version_binary_content,
+            ),
+        ):
+            if content is None or sha256_bytes(content) != stamp["binary_sha256"]:
+                drift.append(label)
+        installed = binary_content is not None and version_binary_content is not None and not any(
+            item.startswith(".nddev-software") or item == "bin/agy" for item in drift
         )
-        expected_asset, expected_artifact_sha, expected_artifact_size = (
-            current_platform_asset_with_size()
-        )
-        expected_source = expected_official_source(expected_asset)
-        expected_identity = {
-            "build_version": VERSION,
-            "version": CLI_VERSION,
-            "asset_name": expected_asset,
-            "artifact_size": expected_artifact_size,
-            "artifact_sha256": expected_artifact_sha,
-            "official_source": expected_source,
-        }
-        for key, expected in expected_identity.items():
+        for key, expected in expected_software_identity().items():
             if stamp[key] != expected:
                 drift.append(key)
     else:
@@ -1053,10 +1274,7 @@ def software_status(target: Path) -> dict[str, Any]:
         or binary.is_symlink()
         or (
             software_root(target).exists()
-            and any(
-                path.is_file() or path.is_symlink()
-                for path in software_root(target).rglob("*")
-            )
+            and any(path.is_file() or path.is_symlink() for path in software_root(target).rglob("*"))
         )
     ):
         drift.append("software-stamp")
@@ -1085,29 +1303,6 @@ def ensure_real_directory_path(path: Path, label: str) -> None:
     os.chmod(path, OWNER_DIR_MODE)
 
 
-def prepare_cli_artifact() -> dict[str, Any]:
-    asset_name, expected_sha, expected_size = current_platform_asset_with_size()
-    test_artifact_url = os.environ.get(INTERNAL_ARTIFACT_ENV)
-    source_url = test_artifact_url or expected_official_source(asset_name)
-    archive = read_artifact(source_url)
-    artifact_digest = sha256_bytes(archive)
-    if test_artifact_url is None:
-        if len(archive) != expected_size:
-            fail(f"official artifact size mismatch for {asset_name}")
-        if artifact_digest != expected_sha:
-            fail(f"official artifact digest mismatch for {asset_name}")
-    binary = extract_cli_binary(archive, asset_name)
-    binary_digest = sha256_bytes(binary)
-    return {
-        "asset_name": asset_name,
-        "artifact_sha256": artifact_digest,
-        "artifact_size": len(archive),
-        "binary": binary,
-        "binary_sha256": binary_digest,
-        "source_url": source_url,
-    }
-
-
 def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
     ensure_target_directory(target, create=True)
     status = software_status(target)
@@ -1128,12 +1323,12 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
         }
 
     artifact = prepare_cli_artifact()
-    before_binary = None
-    before_stamp = None
     binary_path = managed_cli_path(target)
     stamp_path = software_stamp_path(target)
     version_dir = software_version_dir(target)
     version_binary = software_tree_binary_path(target)
+    before_binary = None
+    before_stamp = None
     if binary_path.exists() or binary_path.is_symlink():
         before_binary = read_regular_file(
             binary_path,
@@ -1148,11 +1343,11 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
             owner_only=False,
             max_bytes=METADATA_MAX_BYTES,
         )[0]
-    before_version_exists = False
     root = software_root(target)
     versions = root / "versions"
     ensure_real_directory_path(root, "software root")
     ensure_real_directory_path(versions, "software versions directory")
+    before_version_exists = False
     if version_dir.exists() or version_dir.is_symlink():
         info = version_dir.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -1164,24 +1359,16 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
     )
     staging = versions / f".stage-{os.getpid()}-{time.time_ns()}"
     rollback_version = versions / f".rollback-{os.getpid()}-{time.time_ns()}"
-    changed = []
+    changed: list[str] = []
     if before_binary != artifact["binary"]:
         changed.append("bin/agy")
     before_version_binary = read_optional_software_executable(
         version_binary, f"managed software version binary {version_binary}"
     )
+    version_relative = str(Path(".nddev-software/antigravity-cli/versions/1.1.7") / CLI_COMMAND)
     if before_version_binary != artifact["binary"]:
-        changed.append(str(Path(".nddev-software/antigravity-cli/versions/1.1.7") / CLI_COMMAND))
-    stamp_bytes = canonical_json(
-        software_stamp(
-            target,
-            asset_name=artifact["asset_name"],
-            artifact_sha256=artifact["artifact_sha256"],
-            binary_sha256=artifact["binary_sha256"],
-            source_url=artifact["source_url"],
-            artifact_size=artifact["artifact_size"],
-        )
-    )
+        changed.append(version_relative)
+    stamp_bytes = canonical_json(software_stamp(target, artifact))
     if before_stamp != stamp_bytes:
         changed.append(str(Path(".nddev-software/antigravity-cli") / SOFTWARE_STAMP_NAME))
     try:
@@ -1231,8 +1418,10 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
         "version": CLI_VERSION,
         "current": final_status["current"],
         "changed": changed,
-        "asset_name": artifact["asset_name"],
-        "artifact_sha256": artifact["artifact_sha256"],
+        "platform": artifact["platform"],
+        "manifest_url": artifact["manifest_url"],
+        "artifact_url": artifact["artifact_url"],
+        "artifact_sha512": artifact["artifact_sha512"],
         "artifact_size": artifact["artifact_size"],
         "binary_sha256": artifact["binary_sha256"],
         "managed_command": str(binary_path),
@@ -1276,8 +1465,10 @@ def replace_managed_state(
             continue
         atomic_write(path, content)
     if expected is not None:
-        for relative in (*MANAGED_FILES, STAMP_NAME):
-            target_file_exists(target, relative)
+        for relative, content in desired.items():
+            if relative == STAMP_NAME or relative in MANAGED_FILES:
+                if content is not None:
+                    target_file_exists(target, relative)
 
 
 def restore_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
@@ -1303,6 +1494,20 @@ def backup_pool(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-antigravity-cli-backups"
 
 
+@contextlib.contextmanager
+def backup_pool_lock(target: Path) -> Iterator[None]:
+    lock = target.parent / f".{target.name}.nddev-antigravity-cli-backups-lock"
+    try:
+        lock.mkdir(mode=OWNER_DIR_MODE)
+    except FileExistsError:
+        fail(f"backup pool is already locked: {lock}")
+    try:
+        yield
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            lock.rmdir()
+
+
 def choose_backup_slot(pool: Path) -> int:
     if not pool.exists():
         return 0
@@ -1317,39 +1522,64 @@ def choose_backup_slot(pool: Path) -> int:
 
 
 def write_backup(target: Path, stamp: dict[str, Any]) -> int:
-    pool = backup_pool(target)
-    if pool.exists() and pool.is_symlink():
-        fail("backup pool must not be a symlink")
-    pool.mkdir(mode=OWNER_DIR_MODE, exist_ok=True)
-    os.chmod(pool, OWNER_DIR_MODE)
-    slot = choose_backup_slot(pool)
-    slot_dir = pool / str(slot)
-    if slot_dir.exists():
-        shutil.rmtree(slot_dir)
+    with backup_pool_lock(target):
+        pool = backup_pool(target)
+        if pool.exists() and pool.is_symlink():
+            fail("backup pool must not be a symlink")
+        pool.mkdir(mode=OWNER_DIR_MODE, exist_ok=True)
+        os.chmod(pool, OWNER_DIR_MODE)
+        slot = choose_backup_slot(pool)
+        slot_dir = pool / str(slot)
+        if slot_dir.exists():
+            shutil.rmtree(slot_dir)
+        files_dir = slot_dir / "files"
+        files_dir.mkdir(parents=True, mode=OWNER_DIR_MODE)
+        source_files = stamp_managed_files(stamp)
+        managed_files: dict[str, str | None] = {}
+        for relative in source_files:
+            if target_file_exists(target, relative):
+                content = read_target_file(target, relative, owner_only=False)
+                backup_path = files_dir / safe_relative_path(relative)
+                atomic_write(backup_path, content)
+                managed_files[relative] = managed_digest(relative, content)
+            else:
+                managed_files[relative] = None
+        stamp_content = read_target_file(target, STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
+        envelope = {
+            "schema_version": BACKUP_SCHEMA,
+            "product_name": PRODUCT_NAME,
+            "build_version": VERSION,
+            "slot": slot,
+            "canonical_target": str(target),
+            "source_stamp_schema": stamp["schema_version"],
+            "source_build_version": stamp["build_version"],
+            "source_setup_id": stamp["setup_id"],
+            "source_profile_id": None if is_legacy_stamp(stamp) else stamp["profile_id"],
+            "managed_files": managed_files,
+            "stamp_sha256": sha256_bytes(stamp_content),
+        }
+        atomic_write(slot_dir / BACKUP_NAME, canonical_json(envelope))
+        return slot
+
+
+def read_backup_files(
+    slot_dir: Path,
+    managed_files: dict[str, str | None],
+    files: tuple[str, ...],
+) -> dict[str, bytes | None]:
+    result: dict[str, bytes | None] = {relative: None for relative in MANAGED_FILES}
     files_dir = slot_dir / "files"
-    files_dir.mkdir(parents=True, mode=OWNER_DIR_MODE)
-    managed_files: dict[str, str | None] = {}
-    for relative in MANAGED_FILES:
-        if target_file_exists(target, relative):
-            content = read_target_file(target, relative, owner_only=False)
-            backup_path = files_dir / safe_relative_path(relative)
-            atomic_write(backup_path, content)
-            managed_files[relative] = managed_digest(relative, content)
-        else:
-            managed_files[relative] = None
-    stamp_content = read_target_file(target, STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
-    envelope = {
-        "schema_version": BACKUP_SCHEMA,
-        "product_name": PRODUCT_NAME,
-        "build_version": VERSION,
-        "slot": slot,
-        "canonical_target": str(target),
-        "source_setup_id": stamp["setup_id"],
-        "managed_files": managed_files,
-        "stamp_sha256": sha256_bytes(stamp_content),
-    }
-    atomic_write(slot_dir / BACKUP_NAME, canonical_json(envelope))
-    return slot
+    for relative in files:
+        expected = managed_files[relative]
+        path = files_dir / safe_relative_path(relative)
+        if expected is None:
+            result[relative] = None
+            continue
+        content, _ = read_regular_file(path, f"backup file {relative}", owner_only=False)
+        if managed_digest(relative, content) != expected:
+            fail(f"backup file digest mismatch: {relative}")
+        result[relative] = content
+    return result
 
 
 def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[str, bytes | None]]:
@@ -1360,26 +1590,56 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[str, byte
     if envelope_path.is_symlink() or not envelope_path.is_file():
         fail(f"backup slot is missing: {slot}")
     envelope = read_json_file(envelope_path, f"backup slot {slot}", owner_only=False)
+    if envelope.get("schema_version") == LEGACY_BACKUP_SCHEMA:
+        if set(envelope) != LEGACY_BACKUP_KEYS:
+            fail("legacy backup envelope has invalid keys")
+        if envelope["product_name"] != PRODUCT_NAME or envelope["canonical_target"] != str(target):
+            fail("legacy backup envelope identity is invalid")
+        validate_id(envelope["source_setup_id"], "legacy backup setup id")
+        if envelope["source_setup_id"] not in LEGACY_SETUP_IDS:
+            fail("legacy backup setup id is not recognized")
+        managed = validate_digest_map(
+            envelope["managed_files"],
+            "legacy backup managed_files",
+            LEGACY_MANAGED_FILES,
+        )
+        files = read_backup_files(slot_dir, managed, LEGACY_MANAGED_FILES)
+        files[STAMP_NAME] = canonical_json(
+            legacy_stamp_payload(target, envelope["source_setup_id"], envelope["build_version"], files)
+        )
+        return envelope, files
     if set(envelope) != BACKUP_KEYS:
         fail("backup envelope has invalid keys")
     if envelope["schema_version"] != BACKUP_SCHEMA or envelope["product_name"] != PRODUCT_NAME:
         fail("backup envelope identity or schema is invalid")
     if envelope["canonical_target"] != str(target):
         fail("backup belongs to a different canonical target")
-    validate_digest_map(envelope["managed_files"], "backup managed_files")
-    files: dict[str, bytes | None] = {}
-    files_dir = slot_dir / "files"
-    for relative in MANAGED_FILES:
-        expected = envelope["managed_files"][relative]
-        path = files_dir / safe_relative_path(relative)
-        if expected is None:
-            files[relative] = None
-            continue
-        content, _ = read_regular_file(path, f"backup file {relative}", owner_only=False)
-        if managed_digest(relative, content) != expected:
-            fail(f"backup file digest mismatch: {relative}")
-        files[relative] = content
-    files[STAMP_NAME] = canonical_json(stamp_payload(target, envelope["source_setup_id"], files))
+    source_schema = envelope["source_stamp_schema"]
+    if source_schema == LEGACY_STAMP_SCHEMA:
+        source_files = LEGACY_MANAGED_FILES
+        if envelope["source_setup_id"] not in LEGACY_SETUP_IDS or envelope["source_profile_id"] is not None:
+            fail("backup legacy source identity is invalid")
+    elif source_schema == STAMP_SCHEMA:
+        source_files = MANAGED_FILES
+        if envelope["source_setup_id"] not in SETUP_IDS or envelope["source_profile_id"] not in PROFILE_IDS:
+            fail("backup current source identity is invalid")
+    else:
+        fail("backup source stamp schema is unsupported")
+    managed = validate_digest_map(envelope["managed_files"], "backup managed_files", source_files)
+    files = read_backup_files(slot_dir, managed, source_files)
+    if source_schema == LEGACY_STAMP_SCHEMA:
+        files[STAMP_NAME] = canonical_json(
+            legacy_stamp_payload(
+                target,
+                envelope["source_setup_id"],
+                envelope["source_build_version"],
+                files,
+            )
+        )
+    else:
+        files[STAMP_NAME] = canonical_json(
+            stamp_payload(target, envelope["source_setup_id"], envelope["source_profile_id"], files)
+        )
     return envelope, files
 
 
@@ -1389,6 +1649,9 @@ def current_status(target: Path) -> dict[str, Any]:
             "state": "missing",
             "target": str(target),
             "setup_id": None,
+            "profile_id": None,
+            "legacy": False,
+            "launch_allowed": False,
             "drift": [],
             "builder": {"projection": "native-plugin", "enabled": False},
         }
@@ -1398,36 +1661,42 @@ def current_status(target: Path) -> dict[str, Any]:
             "state": "unmanaged",
             "target": str(target),
             "setup_id": None,
+            "profile_id": None,
+            "legacy": False,
+            "launch_allowed": False,
             "drift": [],
             "builder": {"projection": "native-plugin", "enabled": False},
         }
     drift = detect_drift(target, stamp)
+    legacy = is_legacy_stamp(stamp)
+    builder_files = LEGACY_BUILDER_MANAGED_FILES if legacy else BUILDER_MANAGED_FILES
     return {
-        "state": "managed",
+        "state": "legacy-managed" if legacy else "managed",
         "target": str(target),
         "setup_id": stamp["setup_id"],
+        "profile_id": None if legacy else stamp["profile_id"],
         "build_version": stamp["build_version"],
+        "legacy": legacy,
+        "launch_allowed": not legacy and not drift,
         "drift": drift,
         "builder": {
             "projection": "native-plugin",
-            "enabled": not any(
-                item in drift
-                for item in (BUILDER_PLUGIN, BUILDER_SKILL, BUILDER_AGENT, BUILDER_RULE)
-            ),
+            "enabled": not any(item in drift for item in builder_files),
         },
     }
 
 
-def plan_setup(target: Path, setup_id: str) -> dict[str, Any]:
+def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
     render_setup(setup_id)
+    render_profile(profile_id)
     status = current_status(target)
-    if status["state"] == "missing":
+    if status["state"] in {"missing", "unmanaged"}:
         operation = "install"
         backup_required = False
-    elif status["state"] == "unmanaged":
-        operation = "install"
-        backup_required = False
-    elif status["setup_id"] == setup_id:
+    elif status["state"] == "legacy-managed":
+        operation = "migrate"
+        backup_required = True
+    elif status["setup_id"] == setup_id and status["profile_id"] == profile_id:
         operation = "update"
         backup_required = False
     else:
@@ -1437,15 +1706,17 @@ def plan_setup(target: Path, setup_id: str) -> dict[str, Any]:
         "operation": operation,
         "target": str(target),
         "setup_id": setup_id,
+        "profile_id": profile_id,
         "mutates": False,
         "backup_required": backup_required,
         "state": status["state"],
         "current_setup_id": status["setup_id"],
+        "current_profile_id": status["profile_id"],
         "drift": status["drift"],
     }
 
 
-def require_clean_managed(target: Path) -> dict[str, Any]:
+def require_clean_managed_any(target: Path) -> dict[str, Any]:
     stamp = load_stamp(target)
     if stamp is None:
         fail("target is not managed")
@@ -1455,8 +1726,16 @@ def require_clean_managed(target: Path) -> dict[str, Any]:
     return stamp
 
 
-def mutate_setup(target: Path, setup_id: str, action: str) -> dict[str, Any]:
+def require_clean_current(target: Path) -> dict[str, Any]:
+    stamp = require_clean_managed_any(target)
+    if is_legacy_stamp(stamp):
+        fail("legacy managed Antigravity CLI targets cannot launch; migrate first")
+    return stamp
+
+
+def mutate_setup(target: Path, setup_id: str, profile_id: str, action: str) -> dict[str, Any]:
     setup = render_setup(setup_id)
+    profile = render_profile(profile_id)
     with target_lock(target):
         ensure_target_directory(target, create=True)
         existing_stamp = load_stamp(target)
@@ -1468,27 +1747,60 @@ def mutate_setup(target: Path, setup_id: str, action: str) -> dict[str, Any]:
             drift = detect_drift(target, existing_stamp)
             if drift:
                 fail(f"managed target has drift: {drift}")
+            if is_legacy_stamp(existing_stamp):
+                fail("target has legacy managed state; use migrate, restore, or remove")
         backup_slot: int | None = None
-        if existing_stamp is not None and existing_stamp["setup_id"] != setup_id:
+        if existing_stamp is not None and (
+            existing_stamp["setup_id"] != setup_id or existing_stamp["profile_id"] != profile_id
+        ):
             backup_slot = write_backup(target, existing_stamp)
         before = snapshot_managed_files(target)
-        desired = desired_for_setup(target, setup)
-        desired[STAMP_NAME] = canonical_json(stamp_payload(target, setup_id, desired))
+        desired = desired_for(target, setup, profile)
+        desired[STAMP_NAME] = canonical_json(stamp_payload(target, setup_id, profile_id, desired))
         try:
             replace_managed_state(target, desired, before)
         except BaseException:
             restore_snapshot(target, before)
             raise
-        changed = [
-            relative
-            for relative in MANAGED_FILES
-            if before[relative].digest != sha256_bytes(desired[relative] or b"")
-        ]
+        changed = []
+        for relative in MANAGED_FILES:
+            desired_content = desired[relative]
+            desired_digest = None if desired_content is None else sha256_bytes(desired_content)
+            if before[relative].digest != desired_digest:
+                changed.append(relative)
         return {
             "operation": "install" if existing_stamp is None else action,
             "target": str(target),
             "setup_id": setup_id,
+            "profile_id": profile_id,
             "changed": changed,
+            "backup_slot": backup_slot,
+            "builder": {"projection": "native-plugin", "enabled": True},
+        }
+
+
+def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
+    setup = render_setup(setup_id)
+    profile = render_profile(profile_id)
+    with target_lock(target):
+        existing_stamp = require_clean_managed_any(target)
+        if not is_legacy_stamp(existing_stamp):
+            fail("migrate requires a legacy managed target")
+        backup_slot = write_backup(target, existing_stamp)
+        before = snapshot_managed_files(target)
+        desired = desired_for(target, setup, profile)
+        desired[STAMP_NAME] = canonical_json(stamp_payload(target, setup_id, profile_id, desired))
+        try:
+            replace_managed_state(target, desired, before)
+        except BaseException:
+            restore_snapshot(target, before)
+            raise
+        return {
+            "operation": "migrate",
+            "target": str(target),
+            "legacy_setup_id": existing_stamp["setup_id"],
+            "setup_id": setup_id,
+            "profile_id": profile_id,
             "backup_slot": backup_slot,
             "builder": {"projection": "native-plugin", "enabled": True},
         }
@@ -1496,7 +1808,7 @@ def mutate_setup(target: Path, setup_id: str, action: str) -> dict[str, Any]:
 
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
     with target_lock(target):
-        stamp = require_clean_managed(target)
+        stamp = require_clean_managed_any(target)
         _, files = load_backup(target, slot)
         backup_slot = write_backup(target, stamp)
         before = snapshot_managed_files(target)
@@ -1511,6 +1823,8 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
             "operation": "restore",
             "target": str(target),
             "setup_id": restored_stamp["setup_id"],
+            "profile_id": None if is_legacy_stamp(restored_stamp) else restored_stamp["profile_id"],
+            "legacy": is_legacy_stamp(restored_stamp),
             "backup_slot": backup_slot,
             "restored_backup": slot,
             "builder": {"projection": "native-plugin", "enabled": True},
@@ -1519,7 +1833,7 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
 
 def remove_setup(target: Path) -> dict[str, Any]:
     with target_lock(target):
-        stamp = require_clean_managed(target)
+        stamp = require_clean_managed_any(target)
         backup_slot = write_backup(target, stamp)
         before = snapshot_managed_files(target)
         desired: dict[str, bytes | None] = {relative: None for relative in MANAGED_FILES}
@@ -1537,26 +1851,40 @@ def remove_setup(target: Path) -> dict[str, Any]:
             "operation": "remove",
             "target": str(target),
             "removed_setup_id": stamp["setup_id"],
+            "removed_profile_id": None if is_legacy_stamp(stamp) else stamp["profile_id"],
+            "removed_legacy": is_legacy_stamp(stamp),
             "backup_slot": backup_slot,
             "builder": {"projection": "native-plugin", "enabled": False},
         }
 
 
+def is_sensitive_env_key(key: str) -> bool:
+    upper = key.upper()
+    if upper in SECRET_ENV_EXACT:
+        return True
+    if upper.startswith(SECRET_ENV_PREFIXES) or upper.startswith(LOADER_ENV_PREFIXES):
+        return True
+    return any(fragment in upper for fragment in SECRET_ENV_SUBSTRINGS)
+
+
 def build_launch_env(target: Path) -> dict[str, str]:
     xdg = target / ".xdg"
+    tmp = target / ".tmp"
     env: dict[str, str] = {
         "HOME": str(target),
-        "PATH": os.environ.get("PATH", ""),
+        "PATH": DEFAULT_PATH,
         "LANG": os.environ.get("LANG", "C.UTF-8"),
-        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", os.environ.get("LANG", "C.UTF-8")),
+        "TMPDIR": str(tmp),
         "XDG_CONFIG_HOME": str(xdg / "config"),
         "XDG_DATA_HOME": str(xdg / "data"),
         "XDG_STATE_HOME": str(xdg / "state"),
         "XDG_CACHE_HOME": str(xdg / "cache"),
     }
-    if "TERM" in os.environ:
+    if "TERM" in os.environ and not is_sensitive_env_key("TERM"):
         env["TERM"] = os.environ["TERM"]
     for directory in (
+        tmp,
         Path(env["XDG_CONFIG_HOME"]),
         Path(env["XDG_DATA_HOME"]),
         Path(env["XDG_STATE_HOME"]),
@@ -1564,9 +1892,6 @@ def build_launch_env(target: Path) -> dict[str, str]:
     ):
         directory.mkdir(parents=True, exist_ok=True)
         os.chmod(directory, OWNER_DIR_MODE)
-    for key in list(os.environ):
-        if key in SECRET_ENV_NAMES or key.startswith(SECRET_ENV_PREFIXES):
-            env.pop(key, None)
     return env
 
 
@@ -1585,7 +1910,7 @@ def validate_launch_args(child_args: list[str]) -> None:
 def validate_launch_ready(target: Path, child_args: list[str]) -> Path:
     validate_launch_args(child_args)
     with target_lock(target):
-        require_clean_managed(target)
+        require_clean_current(target)
         status = software_status(target)
         if not status["installed"] or not status["current"]:
             fail("launch requires current target-owned Antigravity CLI software")
@@ -1602,17 +1927,14 @@ def launch(target: Path, child_args: list[str]) -> int:
 
 
 def emit(payload: dict[str, Any] | list[Any], *, as_json: bool) -> None:
-    if as_json:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    list_parser = subparsers.add_parser("list", help="list available setups")
+    list_parser = subparsers.add_parser("list", help="list available setups and profiles")
     list_parser.add_argument("--json", action="store_true")
 
     for name in ("status", "remove"):
@@ -1629,9 +1951,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         command.add_argument("--target")
         command.add_argument("--json", action="store_true")
 
-    for name in ("plan", "install", "apply", "switch"):
+    for name in ("plan", "install", "apply", "switch", "migrate"):
         command = subparsers.add_parser(name)
-        command.add_argument("--setup", required=True)
+        command.add_argument("--setup", default=DEFAULT_SETUP_ID)
+        command.add_argument("--profile", default=DEFAULT_PROFILE_ID)
         command.add_argument("--target")
         command.add_argument("--json", action="store_true")
 
@@ -1655,7 +1978,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(raw_argv)
         if args.command == "list":
-            emit({"setups": list_setups()}, as_json=args.json)
+            emit(
+                {
+                    "default_setup_id": DEFAULT_SETUP_ID,
+                    "default_profile_id": DEFAULT_PROFILE_ID,
+                    "setups": list_setups(),
+                    "profiles": list_profiles(),
+                },
+                as_json=args.json,
+            )
             return 0
         if args.command == "status":
             emit(current_status(resolve_target(args.target)), as_json=args.json)
@@ -1664,15 +1995,26 @@ def main(argv: list[str] | None = None) -> int:
             emit(software_status(resolve_target(args.target)), as_json=args.json)
             return 0
         if args.command in {"install-cli", "update-cli"}:
-            result = install_cli(resolve_target(args.target), args.command)
-            emit(result, as_json=args.json)
+            emit(install_cli(resolve_target(args.target), args.command), as_json=args.json)
             return 0
         if args.command == "plan":
-            emit(plan_setup(resolve_target(args.target), args.setup), as_json=args.json)
+            emit(
+                plan_setup(resolve_target(args.target), args.setup, args.profile),
+                as_json=args.json,
+            )
             return 0
         if args.command in {"install", "apply", "switch"}:
             action = "install" if args.command == "apply" else args.command
-            emit(mutate_setup(resolve_target(args.target), args.setup, action), as_json=args.json)
+            emit(
+                mutate_setup(resolve_target(args.target), args.setup, args.profile, action),
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "migrate":
+            emit(
+                migrate_setup(resolve_target(args.target), args.setup, args.profile),
+                as_json=args.json,
+            )
             return 0
         if args.command == "restore":
             emit(restore_backup(resolve_target(args.target), args.backup), as_json=args.json)

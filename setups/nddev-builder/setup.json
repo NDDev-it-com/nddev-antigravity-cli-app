@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "nddev-builder",
+  "description": "Native Antigravity CLI plugin toolkit for building and checking NDDev setup-manager artifacts.",
+  "managed_files": [
+    ".gemini/antigravity-cli/plugins/nddev-builder/plugin.json",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/references/native-surfaces.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/references/source-owners.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-builder/references/validation-workflows.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-config/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-permissions/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-agents/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-instructions/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-plugins/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-hooks/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-mcp/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-lifecycle/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/skills/nddev-antigravity-validation/SKILL.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/agents/nddev-builder.md",
+    ".gemini/antigravity-cli/plugins/nddev-builder/rules/nddev-builder.md"
+  ],
+  "builder_enabled": true
+}

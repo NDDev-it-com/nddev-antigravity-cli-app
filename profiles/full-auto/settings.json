@@ -1,0 +1,19 @@
+{
+  "toolPermission": "always-proceed",
+  "artifactReviewPolicy": "always-proceed",
+  "enableTerminalSandbox": false,
+  "allowNonWorkspaceAccess": true,
+  "permissions": {
+    "deny": [],
+    "ask": [],
+    "allow": [
+      "read_file(*)",
+      "write_file(*)",
+      "read_url(*)",
+      "execute_url(*)",
+      "command(*)",
+      "unsandboxed(*)",
+      "mcp(*)"
+    ]
+  }
+}
