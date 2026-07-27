@@ -97,16 +97,20 @@ Launch through the managed target:
 python3 cli-tools/nddev_antigravity_cli.py launch --target /absolute/agy-home -- [agy args...]
 ```
 
-`launch` is the authentication boundary. It holds the target lifecycle lock
-through child process completion, requires clean managed setup state, current
-target-owned software, immediate executable digest recheck, the absolute
-target-owned executable, and a filtered child environment. The executable
-handoff is a write-protected verified-path handoff: the manager protects only
-the dedicated lock parent and immutable launcher/software artifact directories.
-It does not make the target HOME, TMPDIR, XDG homes, or Antigravity config tree
-read-only for the child. The manager does not claim portable fd execution, and
-without a sandbox it does not claim resistance against a deliberate same-UID
-process that changes directory modes.
+`launch` is the authentication boundary. It holds the authoritative external
+bootstrap lifecycle lock and then the target-internal lock through child process
+completion. It requires clean managed setup state, current target-owned
+software, immediate executable digest recheck, the absolute target-owned
+executable, and a filtered child environment. The external lock is a persistent
+0600 flock file under the fixed validated system temp bootstrap root, keyed by
+the product namespace plus canonical target. The target-internal lock remains
+only target-local state. The executable handoff is a write-protected
+verified-path handoff: the manager protects only the dedicated lock parent and
+immutable launcher/software artifact directories. It does not make the target
+HOME, TMPDIR, XDG homes, or Antigravity config tree read-only for the child. The
+manager does not claim portable fd execution, and without a sandbox it does not
+claim resistance against deliberate same-UID tampering of the bootstrap root or
+directory modes.
 
 ## Public validation
 

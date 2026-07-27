@@ -39,32 +39,38 @@ Updates stage a complete version tree under the target and atomically rename it
 into place. On failure, the manager restores the previous version tree, the
 visible `bin/agy`, and the software stamp.
 
-Setup backups and locks are target-internal under the explicit target. The
-target lifecycle lock is a persistent private lock directory containing a 0600
-regular lock file held with nonblocking `fcntl.flock` for the complete
-lifecycle operation. While held, the lock directory is traversable but not
-writable, so ordinary child cleanup cannot unlink the lock file. The lock
-directory is separate from runtime HOME, TMP, XDG, and Antigravity config state.
-Backup pool locks remain target-internal private directories. The manager rejects
-symlinked or non-private lock, backup pool, and backup slot paths.
+Lifecycle operations use two locks. The authoritative external bootstrap lock
+is acquired first and released last. It is a persistent 0600 regular file under
+the per-product, per-UID bootstrap root in the fixed validated system temp root
+(`/private/tmp` on macOS after resolving `/tmp`, `/tmp` on Ubuntu). Its filename
+and JSON payload are bound to the product namespace plus canonical absolute
+target, and it is never exposed through the child environment. The
+target-internal lock is acquired second and released first; it remains
+target-local state for local consistency. While held, the internal lock
+directory is traversable but not writable, so ordinary child cleanup cannot
+unlink the lock file. The internal lock directory is separate from runtime HOME,
+TMP, XDG, and Antigravity config state. Backup pool locks remain target-internal
+private directories. The manager rejects symlinked or non-private lock, backup
+pool, and backup slot paths.
 
 ## Launch safety
 
-`launch` holds the target-internal lifecycle lock from preflight through child
-process completion. While holding that lock, it validates the managed setup,
-requires current target-owned software, immediately rechecks the target-owned
-`bin/agy` and version-tree binary digests, builds the filtered child
-environment, and starts only the absolute target-owned `bin/agy` path. During
-the child lifetime, the manager keeps the target-owned executable and software
-artifact directories read/execute-only and restores their owner-private
-writable mode afterward. It does not make the target HOME, TMPDIR, XDG homes,
-or Antigravity config/session tree read-only for the launched CLI. The protected
-directories are verified through `O_NOFOLLOW` file descriptors before mode
-changes and before the immediate executable digest recheck. This is a
-write-protected verified-path handoff under a no-sandbox same-UID threat
+`launch` holds the external lock and target-internal lifecycle lock from
+preflight through child process completion. While holding those locks, it
+validates the managed setup, requires current target-owned software, immediately
+rechecks the target-owned `bin/agy` and version-tree binary digests, builds the
+filtered child environment, and starts only the absolute target-owned `bin/agy`
+path. During the child lifetime, the manager keeps the target-owned executable
+and software artifact directories read/execute-only and restores their
+owner-private writable mode afterward. It does not make the target HOME, TMPDIR,
+XDG homes, or Antigravity config/session tree read-only for the launched CLI.
+The protected directories are verified through `O_NOFOLLOW` file descriptors
+before mode changes and before the immediate executable digest recheck. This is
+a write-protected verified-path handoff under a no-sandbox same-UID threat
 boundary; it is not portable fd execution and does not claim deliberate
-same-UID chmod resistance. Other lifecycle mutations fail while the launched
-child is running. It rejects
+same-UID tamper resistance for the bootstrap root or chmod resistance. Other
+lifecycle mutations fail while the launched child is running, including when
+the child renames the target-internal lock directory. It rejects
 Antigravity CLI override flags that would replace the managed sandbox,
 permission, execution-mode, custom-agent, or working-directory scope for the
 session.

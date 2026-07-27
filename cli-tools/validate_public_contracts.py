@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -595,6 +597,16 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
                 errors.append(f"build/manifest.json: runtime_launch.{key} must be true")
         if launch.get("target_lock_mechanism") != "persistent-target-internal-flock-file":
             errors.append("build/manifest.json: target lock mechanism mismatch")
+        if launch.get("authoritative_lock_mechanism") != "external-bootstrap-flock-file":
+            errors.append("build/manifest.json: authoritative lock mechanism mismatch")
+        if launch.get("external_lock_binding") != "product-namespaced-sha256-canonical-target-json":
+            errors.append("build/manifest.json: external lock binding mismatch")
+        if launch.get("external_lock_persistent") is not True:
+            errors.append("build/manifest.json: external lock persistence must be true")
+        if launch.get("external_lock_exposed_to_child") is not False:
+            errors.append("build/manifest.json: external lock must not be exposed to child")
+        if launch.get("target_internal_lock_role") != "target-local-state":
+            errors.append("build/manifest.json: target internal lock role mismatch")
         if launch.get("executable_handoff") != "write-protected-verified-path":
             errors.append("build/manifest.json: executable handoff mismatch")
         if launch.get("protected_path_scope") != "lock-and-artifact-directories-only":
@@ -653,6 +665,16 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
                 errors.append(f"config/nddev-contract.json: runtime_launch.{key} must be true")
         if launch.get("target_lock_mechanism") != "persistent-target-internal-flock-file":
             errors.append("config/nddev-contract.json: target lock mechanism mismatch")
+        if launch.get("authoritative_lock_mechanism") != "external-bootstrap-flock-file":
+            errors.append("config/nddev-contract.json: authoritative lock mechanism mismatch")
+        if launch.get("external_lock_binding") != "product-namespaced-sha256-canonical-target-json":
+            errors.append("config/nddev-contract.json: external lock binding mismatch")
+        if launch.get("external_lock_persistent") is not True:
+            errors.append("config/nddev-contract.json: external lock persistence must be true")
+        if launch.get("external_lock_exposed_to_child") is not False:
+            errors.append("config/nddev-contract.json: external lock must not be exposed to child")
+        if launch.get("target_internal_lock_role") != "target-local-state":
+            errors.append("config/nddev-contract.json: target internal lock role mismatch")
         if launch.get("executable_handoff") != "write-protected-verified-path":
             errors.append("config/nddev-contract.json: executable handoff mismatch")
         if launch.get("protected_path_scope") != "lock-and-artifact-directories-only":
@@ -785,6 +807,13 @@ def check_runtime_lock_source(errors: list[str]) -> None:
         "fcntl.LOCK_EX | fcntl.LOCK_NB",
         "O_NOFOLLOW",
         "TARGET_LOCK_FILE_NAME",
+        "EXTERNAL_LOCK_POOL_PREFIX",
+        "external_target_lock",
+        "system_temp_root",
+        "external_lock_binding",
+        "require_external_lock_file_identity",
+        "validate_or_write_external_lock_binding",
+        "Path(\"/tmp\").resolve(strict=True)",
         "protected_launch_handoff",
         "subprocess.Popen",
     )
@@ -816,6 +845,7 @@ def chmod_private(path: Path) -> None:
 
 
 def install_fake_current_software(manager: Any, target: Path, script: bytes) -> None:
+    target = manager.canonical_target_identity(target)
     manifest = manager.pinned_manifest()
     artifact = {
         "platform": manifest["platform"],
@@ -860,6 +890,135 @@ def wait_for_file(path: Path, process: subprocess.Popen[str], errors: list[str],
         time.sleep(0.05)
     errors.append(f"{label}: readiness marker timed out")
     return False
+
+
+def wait_for_file_with_pid(path: Path, pid: int, errors: list[str], label: str) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        observed_pid, status = os.waitpid(pid, os.WNOHANG)
+        if observed_pid == pid:
+            errors.append(f"{label}: child exited before readiness marker: {status}")
+            return False
+        time.sleep(0.05)
+    errors.append(f"{label}: readiness marker timed out")
+    return False
+
+
+def wait_for_pid(pid: int, errors: list[str], label: str, timeout: float = 5) -> int | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        observed_pid, status = os.waitpid(pid, os.WNOHANG)
+        if observed_pid == pid:
+            if os.WIFEXITED(status):
+                return os.WEXITSTATUS(status)
+            if os.WIFSIGNALED(status):
+                return 128 + os.WTERMSIG(status)
+            return status
+        time.sleep(0.05)
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(pid, 0)
+    errors.append(f"{label}: child did not exit")
+    return None
+
+
+def fork_launch(manager: Any, target: Path, child_args: list[str], error_path: Path) -> int:
+    if not hasattr(os, "fork"):
+        raise AssertionError("POSIX fork is required for isolated launch lock validation")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            exit_code = manager.launch(target, child_args)
+        except BaseException as exc:  # noqa: BLE001 - child reports validator failures.
+            error_path.write_text(f"{exc.__class__.__name__}: {exc}\n", encoding="utf-8")
+            os._exit(120)
+        os._exit(exit_code if 0 <= exit_code <= 125 else 125)
+    return pid
+
+
+def fork_external_lock_worker(
+    manager: Any,
+    target: Path,
+    ready: Path,
+    release: Path,
+    error_path: Path,
+) -> int:
+    if not hasattr(os, "fork"):
+        raise AssertionError("POSIX fork is required for isolated external lock validation")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            canonical_target = manager.canonical_target_identity(target)
+            with manager.external_target_lock(canonical_target):
+                lock_path = manager.external_lock_file_path(canonical_target)
+                info = lock_path.stat()
+                binding = json.loads(lock_path.read_text(encoding="utf-8"))
+                ready.write_text(
+                    json.dumps(
+                        {
+                            "path": str(lock_path),
+                            "st_dev": info.st_dev,
+                            "st_ino": info.st_ino,
+                            "mode": stat.S_IMODE(info.st_mode),
+                            "binding": binding,
+                        },
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+                while not release.exists():
+                    time.sleep(0.05)
+        except BaseException as exc:  # noqa: BLE001 - child reports validator failures.
+            error_path.write_text(f"{exc.__class__.__name__}: {exc}\n", encoding="utf-8")
+            os._exit(120)
+        os._exit(0)
+    return pid
+
+
+def fork_external_lock_try_worker(
+    manager: Any,
+    target: Path,
+    result_path: Path,
+) -> int:
+    if not hasattr(os, "fork"):
+        raise AssertionError("POSIX fork is required for isolated external lock validation")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            with manager.external_target_lock(manager.canonical_target_identity(target)):
+                result = {"acquired": True, "error": None}
+        except manager.ManagerError as exc:
+            result = {"acquired": False, "error": str(exc)}
+        except BaseException as exc:  # noqa: BLE001 - child reports validator failures.
+            result = {"acquired": False, "error": f"{exc.__class__.__name__}: {exc}"}
+            result_path.write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
+            os._exit(120)
+        result_path.write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
+        os._exit(0)
+    return pid
+
+
+@contextlib.contextmanager
+def isolated_bootstrap_root(errors: list[str], manager: Any) -> Iterator[Path]:
+    original_system_temp_root = manager.system_temp_root
+    probe = Path("/tmp") / "nddev-antigravity-cli-app-validator-probe"
+    production_pool = manager.external_lock_file_path(probe).parent
+    before = sorted(path.name for path in production_pool.iterdir()) if production_pool.exists() else []
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw) / "bootstrap-root"
+        root.mkdir(mode=0o700)
+        os.chmod(root, 0o700)
+        manager.system_temp_root = lambda: root
+        try:
+            yield root
+        finally:
+            manager.system_temp_root = original_system_temp_root
+    after = sorted(path.name for path in production_pool.iterdir()) if production_pool.exists() else []
+    if after != before:
+        errors.append("isolated bootstrap validation created real system bootstrap artifacts")
 
 
 def snapshot_target_regular_files(target: Path) -> dict[str, bytes]:
@@ -1100,21 +1259,10 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
             "install",
         )
         install_fake_current_software(manager, target, script)
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                str(ROOT / "cli-tools/nddev_antigravity_cli.py"),
-                "launch",
-                "--target",
-                str(target),
-                "--",
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        launch_error = root / "launch-error.txt"
+        pid = fork_launch(manager, target, [], launch_error)
         try:
-            if not wait_for_file(ready, process, errors, "launch lock concurrency"):
+            if not wait_for_file_with_pid(ready, pid, errors, "launch lock concurrency"):
                 return
             lock_parent = target / ".nddev-antigravity-cli-lock"
             lock_file = lock_parent / "lock"
@@ -1211,16 +1359,12 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
             if lock_parent.is_dir() and stat.S_IMODE(lock_parent.stat().st_mode) != 0o500:
                 errors.append("launch lock concurrency: contention made lock parent writable")
             stop.write_text("stop\n", encoding="utf-8")
-            try:
-                stdout, stderr = process.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, stderr = process.communicate(timeout=5)
-                errors.append("launch lock concurrency: child did not exit after stop marker")
-            if process.returncode != 0:
+            exit_code = wait_for_pid(pid, errors, "launch lock concurrency")
+            if exit_code != 0:
+                child_error = launch_error.read_text(encoding="utf-8") if launch_error.exists() else ""
                 errors.append(
                     "launch lock concurrency: launch returned "
-                    f"{process.returncode}: {stdout}{stderr}"
+                    f"{exit_code}: {child_error}"
                 )
             if not lock_parent.is_dir() or not lock_file.is_file():
                 errors.append("launch lock concurrency: persistent lock disappeared")
@@ -1230,20 +1374,197 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
                 if guarded.exists() and stat.S_IMODE(guarded.stat().st_mode) != 0o700:
                     errors.append(f"launch handoff: guarded directory was not restored: {guarded}")
         finally:
-            if process.poll() is None:
-                stop.write_text("stop\n", encoding="utf-8")
-                try:
-                    process.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.communicate(timeout=5)
+            with contextlib.suppress(ChildProcessError):
+                observed_pid, _ = os.waitpid(pid, os.WNOHANG)
+                if observed_pid == 0:
+                    stop.write_text("stop\n", encoding="utf-8")
+                    wait_for_pid(pid, errors, "launch lock concurrency cleanup")
 
 
-def check_adversarial_smokes(errors: list[str]) -> None:
-    manager = import_manager(errors)
-    if manager is None:
-        return
+def check_external_lock_blocks_internal_lock_rename(errors: list[str], manager: Any) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = manager.resolve_target(str(root / "internal-rename-target"))
+        ready = root / "rename-child-ready"
+        stop = root / "rename-child-stop"
+        capture = root / "rename-child-capture.json"
+        renamed_lock_parent = target / ".renamed-antigravity-cli-lock"
+        script = (
+            f"#!{sys.executable}\n"
+            "import json\n"
+            "import os\n"
+            "import time\n"
+            "from pathlib import Path\n"
+            f"target = Path({str(target)!r})\n"
+            f"ready = Path({str(ready)!r})\n"
+            f"stop = Path({str(stop)!r})\n"
+            f"capture = Path({str(capture)!r})\n"
+            f"renamed = Path({str(renamed_lock_parent)!r})\n"
+            "lock_parent = target / '.nddev-antigravity-cli-lock'\n"
+            "results = {'external_lock_env': [], 'rename_internal_lock_parent': None}\n"
+            "results['external_lock_env'] = sorted(\n"
+            "    key for key in os.environ\n"
+            "    if ('LOCK' in key.upper()) and ('NDDEV' in key.upper() or 'ANTIGRAVITY' in key.upper())\n"
+            ")\n"
+            "try:\n"
+            "    os.rename(lock_parent, renamed)\n"
+            "except OSError as exc:\n"
+            "    results['rename_internal_lock_parent'] = 'error:' + exc.__class__.__name__\n"
+            "else:\n"
+            "    results['rename_internal_lock_parent'] = 'succeeded'\n"
+            "capture.write_text(json.dumps(results, sort_keys=True), encoding='utf-8')\n"
+            "ready.write_text('ready\\n', encoding='utf-8')\n"
+            "while not stop.exists():\n"
+            "    time.sleep(0.05)\n"
+            "raise SystemExit(0)\n"
+        ).encode("utf-8")
+        manager.mutate_setup(
+            target,
+            manager.DEFAULT_SETUP_ID,
+            manager.DEFAULT_PROFILE_ID,
+            "install",
+        )
+        install_fake_current_software(manager, target, script)
+        launch_error = root / "rename-launch-error.txt"
+        pid = fork_launch(manager, target, [], launch_error)
+        try:
+            if not wait_for_file_with_pid(ready, pid, errors, "internal lock rename"):
+                return
+            report = json.loads(capture.read_text(encoding="utf-8"))
+            if report.get("external_lock_env") != []:
+                errors.append("internal lock rename: external lock leaked through child env")
+            if report.get("rename_internal_lock_parent") != "succeeded":
+                errors.append(f"internal lock rename: child did not rename lock parent: {report}")
+            if (target / ".nddev-antigravity-cli-lock").exists():
+                errors.append("internal lock rename: original internal lock parent still exists")
+            if not renamed_lock_parent.is_dir():
+                errors.append("internal lock rename: renamed internal lock parent missing")
+            canonical_target = manager.canonical_target_identity(target)
+            external_lock = manager.external_lock_file_path(canonical_target)
+            if external_lock.is_relative_to(target):
+                errors.append("internal lock rename: external lock is inside target")
+            if not external_lock.is_file():
+                errors.append("internal lock rename: external lock file missing")
+            elif stat.S_IMODE(external_lock.stat().st_mode) != 0o600:
+                errors.append("internal lock rename: external lock file mode mismatch")
+            for label, callback in (
+                (
+                    "switch",
+                    lambda: manager.mutate_setup(
+                        target,
+                        manager.DEFAULT_SETUP_ID,
+                        "safe",
+                        "switch",
+                    ),
+                ),
+                ("remove", lambda: manager.remove_setup(target)),
+                (
+                    "install",
+                    lambda: manager.mutate_setup(
+                        target,
+                        manager.DEFAULT_SETUP_ID,
+                        manager.DEFAULT_PROFILE_ID,
+                        "install",
+                    ),
+                ),
+            ):
+                expect_manager_error(errors, f"internal lock rename concurrent {label}", manager, callback)
+            stop.write_text("stop\n", encoding="utf-8")
+            exit_code = wait_for_pid(pid, errors, "internal lock rename")
+            if exit_code != 0:
+                child_error = launch_error.read_text(encoding="utf-8") if launch_error.exists() else ""
+                errors.append(f"internal lock rename: launch returned {exit_code}: {child_error}")
+        finally:
+            with contextlib.suppress(ChildProcessError):
+                observed_pid, _ = os.waitpid(pid, os.WNOHANG)
+                if observed_pid == 0:
+                    stop.write_text("stop\n", encoding="utf-8")
+                    wait_for_pid(pid, errors, "internal lock rename cleanup")
 
+
+def check_external_lock_three_process_handover(errors: list[str], manager: Any) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = manager.resolve_target(str(root / "handover-target"))
+        canonical_target = manager.canonical_target_identity(target)
+        release_a = root / "release-a"
+        release_b = root / "release-b"
+        ready_a = root / "ready-a.json"
+        ready_b = root / "ready-b.json"
+        error_a = root / "error-a.txt"
+        error_b = root / "error-b.txt"
+        pid_a = fork_external_lock_worker(manager, canonical_target, ready_a, release_a, error_a)
+        try:
+            if not wait_for_file_with_pid(ready_a, pid_a, errors, "external lock handover A"):
+                return
+            report_a = json.loads(ready_a.read_text(encoding="utf-8"))
+            lock_path = Path(report_a["path"])
+            if not lock_path.is_file():
+                errors.append("external lock handover: lock file missing while A holds")
+            elif stat.S_IMODE(lock_path.stat().st_mode) != 0o600:
+                errors.append("external lock handover: lock file mode mismatch while A holds")
+            if report_a.get("binding") != manager.external_lock_binding(canonical_target):
+                errors.append("external lock handover: binding mismatch while A holds")
+            release_a.write_text("release\n", encoding="utf-8")
+            if wait_for_pid(pid_a, errors, "external lock handover A") != 0:
+                child_error = error_a.read_text(encoding="utf-8") if error_a.exists() else ""
+                errors.append(f"external lock handover: A failed: {child_error}")
+            if not lock_path.is_file():
+                errors.append("external lock handover: persistent lock was removed after A")
+                return
+            after_a = lock_path.stat()
+            if (after_a.st_dev, after_a.st_ino) != (report_a["st_dev"], report_a["st_ino"]):
+                errors.append("external lock handover: inode changed after A release")
+            pid_b = fork_external_lock_worker(manager, canonical_target, ready_b, release_b, error_b)
+            try:
+                if not wait_for_file_with_pid(ready_b, pid_b, errors, "external lock handover B"):
+                    return
+                report_b = json.loads(ready_b.read_text(encoding="utf-8"))
+                if (report_b["st_dev"], report_b["st_ino"]) != (
+                    report_a["st_dev"],
+                    report_a["st_ino"],
+                ):
+                    errors.append("external lock handover: B acquired a different lock inode")
+                result_c = root / "result-c.json"
+                pid_c = fork_external_lock_try_worker(manager, canonical_target, result_c)
+                if wait_for_pid(pid_c, errors, "external lock handover C") != 0:
+                    errors.append("external lock handover: C process failed")
+                if not result_c.is_file():
+                    errors.append("external lock handover: C result missing")
+                else:
+                    report_c = json.loads(result_c.read_text(encoding="utf-8"))
+                    if report_c.get("acquired") is not False:
+                        errors.append(f"external lock handover: C unexpectedly acquired lock: {report_c}")
+                    if "externally locked" not in str(report_c.get("error")):
+                        errors.append(f"external lock handover: C error mismatch: {report_c}")
+                release_b.write_text("release\n", encoding="utf-8")
+                if wait_for_pid(pid_b, errors, "external lock handover B") != 0:
+                    child_error = error_b.read_text(encoding="utf-8") if error_b.exists() else ""
+                    errors.append(f"external lock handover: B failed: {child_error}")
+                if not lock_path.is_file():
+                    errors.append("external lock handover: persistent lock was removed after B")
+                else:
+                    after_b = lock_path.stat()
+                    if (after_b.st_dev, after_b.st_ino) != (
+                        report_a["st_dev"],
+                        report_a["st_ino"],
+                    ):
+                        errors.append("external lock handover: inode changed after B release")
+            finally:
+                with contextlib.suppress(ChildProcessError):
+                    observed_pid, _ = os.waitpid(pid_b, os.WNOHANG)
+                    if observed_pid == 0:
+                        release_b.write_text("release\n", encoding="utf-8")
+                        wait_for_pid(pid_b, errors, "external lock handover B cleanup")
+        finally:
+            with contextlib.suppress(ChildProcessError):
+                observed_pid, _ = os.waitpid(pid_a, os.WNOHANG)
+                if observed_pid == 0:
+                    release_a.write_text("release\n", encoding="utf-8")
+                    wait_for_pid(pid_a, errors, "external lock handover A cleanup")
+
+
+def check_adversarial_smokes_with_manager(errors: list[str], manager: Any) -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         target = root / "world-target"
@@ -1478,6 +1799,16 @@ def check_adversarial_smokes(errors: list[str]) -> None:
     check_malformed_legacy_stamp_errors(errors, manager)
     check_launch_allowed_requires_software(errors, manager)
     check_launch_lock_blocks_lifecycle_mutations(errors, manager)
+    check_external_lock_blocks_internal_lock_rename(errors, manager)
+    check_external_lock_three_process_handover(errors, manager)
+
+
+def check_adversarial_smokes(errors: list[str]) -> None:
+    manager = import_manager(errors)
+    if manager is None:
+        return
+    with isolated_bootstrap_root(errors, manager):
+        check_adversarial_smokes_with_manager(errors, manager)
 
 
 def check_no_current_forbidden_surfaces(errors: list[str]) -> None:

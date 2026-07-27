@@ -56,6 +56,8 @@ SOFTWARE_ARTIFACT_MAX_BYTES = 300 * 1024 * 1024
 DEFAULT_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 TARGET_LOCK_DIR_NAME = ".nddev-antigravity-cli-lock"
 TARGET_LOCK_FILE_NAME = "lock"
+EXTERNAL_LOCK_POOL_PREFIX = "nddev-antigravity-cli-app-locks"
+EXTERNAL_LOCK_FILE_SCHEMA = 1
 
 CLI_VERSION = "1.1.7"
 CLI_COMMAND = "agy"
@@ -580,23 +582,7 @@ def resolve_target(raw_target: str | None) -> Path:
     if not raw_target:
         fail("--target is required")
     expanded = Path(raw_target).expanduser()
-    if not expanded.is_absolute():
-        fail("--target must be an absolute path")
-    try:
-        raw_info = expanded.lstat()
-    except FileNotFoundError:
-        raw_info = None
-    if raw_info is not None and stat.S_ISLNK(raw_info.st_mode):
-        fail("--target must not be a symlink")
-    target = expanded.resolve(strict=False)
-    if target == Path(target.anchor):
-        fail("filesystem root cannot be a target")
-    parent_info = require_directory(target.parent, "canonical --target parent")
-    if stat.S_ISLNK(parent_info.st_mode):
-        fail("canonical --target parent must be a real directory")
-    if target.exists():
-        require_directory(target, "--target")
-    return target
+    return canonical_target_identity(expanded)
 
 
 def ensure_target_directory(target: Path, *, create: bool) -> bool:
@@ -707,6 +693,220 @@ def set_directory_fd_mode(
     current = require_owner_directory_modes(path, label, {mode})
     if identity_of(current) != identity_of(opened):
         raise ConcurrentTargetChange(f"{label} changed while its mode was adjusted")
+
+
+def path_contains(container: Path, candidate: Path) -> bool:
+    try:
+        candidate.relative_to(container)
+    except ValueError:
+        return False
+    return True
+
+
+def canonical_target_identity(target: Path) -> Path:
+    if not target.is_absolute():
+        fail("--target must be an absolute path")
+    normalized = Path(os.path.normpath(str(target)))
+    if normalized == Path(normalized.anchor):
+        fail("filesystem root cannot be a target")
+    try:
+        parent = normalized.parent.resolve(strict=True)
+    except FileNotFoundError as exc:
+        fail(f"canonical --target parent is missing: {exc}")
+    except OSError as exc:
+        fail(f"canonical --target parent cannot be resolved: {exc}")
+    parent_info = require_directory(parent, "canonical --target parent")
+    if stat.S_ISLNK(parent_info.st_mode):
+        fail("canonical --target parent must be a real directory")
+    canonical = parent / normalized.name
+    try:
+        target_info = canonical.lstat()
+    except FileNotFoundError:
+        return canonical
+    if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISDIR(target_info.st_mode):
+        fail("--target must be a real directory")
+    return canonical
+
+
+def mkdir_owner_private(path: Path) -> None:
+    previous_umask = os.umask(0o077)
+    try:
+        path.mkdir(mode=OWNER_DIR_MODE)
+    finally:
+        os.umask(previous_umask)
+
+
+def current_uid() -> int:
+    if not hasattr(os, "geteuid"):
+        fail("external lifecycle lock requires current-user ownership support")
+    return os.geteuid()
+
+
+def system_temp_root() -> Path:
+    try:
+        base = Path("/tmp").resolve(strict=True)
+    except OSError as exc:
+        fail(f"external lifecycle lock base is unavailable: {exc}")
+    info = require_directory(base, "external lifecycle lock system temp root")
+    if stat.S_ISLNK(info.st_mode):
+        fail("external lifecycle lock system temp root must be a real directory")
+    if stat.S_IMODE(info.st_mode) & stat.S_ISVTX == 0:
+        fail("external lifecycle lock system temp root must be sticky")
+    return base
+
+
+def external_lock_pool_path() -> Path:
+    base = system_temp_root()
+    return base / f"{EXTERNAL_LOCK_POOL_PREFIX}-{current_uid()}"
+
+
+def external_lock_digest(target: Path) -> str:
+    return sha256_bytes(f"{PRODUCT_NAME}\0{target}".encode("utf-8"))
+
+
+def external_lock_file_path(target: Path) -> Path:
+    return external_lock_pool_path() / f"target-{external_lock_digest(target)}.lock"
+
+
+def external_lock_binding(target: Path) -> dict[str, Any]:
+    return {
+        "schema_version": EXTERNAL_LOCK_FILE_SCHEMA,
+        "product": PRODUCT_NAME,
+        "target": str(target),
+        "target_sha256": external_lock_digest(target),
+    }
+
+
+def ensure_external_lock_pool(target: Path) -> tuple[Path, int]:
+    pool = external_lock_pool_path()
+    if path_contains(target, pool) or path_contains(pool, target):
+        fail("external lifecycle lock pool must be outside the target subtree")
+    try:
+        mkdir_owner_private(pool)
+    except FileExistsError:
+        pass
+    descriptor, _ = open_owner_directory_fd(
+        pool,
+        "external lifecycle lock pool",
+        {OWNER_DIR_MODE},
+    )
+    return pool, descriptor
+
+
+def read_lock_file_descriptor(descriptor: int, label: str) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        block = os.read(descriptor, 65536)
+        if not block:
+            break
+        total += len(block)
+        if total > METADATA_MAX_BYTES:
+            fail(f"{label} exceeds the bounded metadata limit")
+        chunks.append(block)
+    return b"".join(chunks)
+
+
+def validate_or_write_external_lock_binding(descriptor: int, target: Path) -> None:
+    expected = external_lock_binding(target)
+    content = read_lock_file_descriptor(descriptor, "external lifecycle lock binding")
+    if content:
+        observed = parse_json_object(content, "external lifecycle lock binding")
+        if observed != expected:
+            fail("external lifecycle lock binding mismatch")
+        return
+    payload = canonical_json(expected)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    os.ftruncate(descriptor, 0)
+    written = os.write(descriptor, payload)
+    if written != len(payload):
+        fail("external lifecycle lock binding could not be written")
+    os.fsync(descriptor)
+
+
+def require_external_lock_file_identity(
+    descriptor: int,
+    lock_file: Path,
+    label: str,
+) -> os.stat_result:
+    lock_info = os.fstat(descriptor)
+    if not stat.S_ISREG(lock_info.st_mode):
+        fail(f"{label} must be a regular file")
+    if lock_info.st_nlink != 1:
+        fail(f"{label} must not have hard-link aliases")
+    if owner_of(lock_info) != current_uid():
+        fail(f"{label} must be owned by the current user")
+    if stat.S_IMODE(lock_info.st_mode) != OWNER_FILE_MODE:
+        fail(f"{label} must be owned by the current user with mode 0600")
+    try:
+        path_info = lock_file.lstat()
+    except FileNotFoundError as exc:
+        raise ConcurrentTargetChange(f"{label} disappeared while opening") from exc
+    if (
+        stat.S_ISLNK(path_info.st_mode)
+        or not stat.S_ISREG(path_info.st_mode)
+        or identity_of(path_info) != identity_of(lock_info)
+    ):
+        raise ConcurrentTargetChange(f"{label} changed while opening")
+    return lock_info
+
+
+@contextlib.contextmanager
+def external_target_lock(target: Path) -> Iterator[None]:
+    target = canonical_target_identity(target)
+    pool_descriptor: int | None = None
+    lock_descriptor: int | None = None
+    lock_acquired = False
+    pool, pool_descriptor = ensure_external_lock_pool(target)
+    lock_file = pool / f"target-{external_lock_digest(target)}.lock"
+    lock_file_missing = False
+    try:
+        lock_file.lstat()
+    except FileNotFoundError:
+        lock_file_missing = True
+    flags = os.O_RDWR | os.O_CREAT | nofollow_flag("external lifecycle lock file")
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    try:
+        lock_descriptor = os.open(lock_file, flags, OWNER_FILE_MODE)
+    except OSError as exc:
+        fail(f"external lifecycle lock file cannot be opened safely: {exc}")
+    try:
+        lock_info = os.fstat(lock_descriptor)
+        if stat.S_IMODE(lock_info.st_mode) != OWNER_FILE_MODE:
+            if lock_file_missing:
+                os.fchmod(lock_descriptor, OWNER_FILE_MODE)
+        require_external_lock_file_identity(
+            lock_descriptor,
+            lock_file,
+            "external lifecycle lock file",
+        )
+        try:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail(f"target is already externally locked: {lock_file}")
+        lock_acquired = True
+        require_external_lock_file_identity(
+            lock_descriptor,
+            lock_file,
+            "external lifecycle lock file",
+        )
+        validate_or_write_external_lock_binding(lock_descriptor, target)
+        require_external_lock_file_identity(
+            lock_descriptor,
+            lock_file,
+            "external lifecycle lock file",
+        )
+        yield
+    finally:
+        if lock_descriptor is not None:
+            if lock_acquired:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+            os.close(lock_descriptor)
+        if pool_descriptor is not None:
+            os.close(pool_descriptor)
 
 
 def require_private_target(target: Path) -> None:
@@ -1341,6 +1541,7 @@ def expected_software_identity() -> dict[str, Any]:
 
 
 def software_status(target: Path) -> dict[str, Any]:
+    target = canonical_target_identity(target)
     if not ensure_target_directory(target, create=False):
         return {
             "schema_version": 1,
@@ -1572,7 +1773,7 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
 
 
 def install_cli(target: Path, command: str) -> dict[str, Any]:
-    with target_lock(target, create=command == "install-cli"):
+    with target_lock(target, create=command == "install-cli") as target:
         return install_cli_unlocked(target, command)
 
 
@@ -1620,97 +1821,99 @@ def restore_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
 
 
 @contextlib.contextmanager
-def target_lock(target: Path, *, create: bool) -> Iterator[None]:
-    if not ensure_private_target(target, create=create):
-        fail("--target is missing")
-    lock_parent = target / TARGET_LOCK_DIR_NAME
-    lock_file = lock_parent / TARGET_LOCK_FILE_NAME
-    parent_descriptor: int | None = None
-    lock_descriptor: int | None = None
-    lock_acquired = False
-    try:
-        lock_parent.mkdir(mode=OWNER_DIR_MODE)
-    except FileExistsError:
-        pass
-    parent_descriptor, parent_info = open_owner_directory_fd(
-        lock_parent,
-        "target lock parent",
-        {OWNER_DIR_MODE, OWNER_READ_EXEC_DIR_MODE},
-    )
-    try:
-        lock_file_missing = False
+def target_lock(target: Path, *, create: bool) -> Iterator[Path]:
+    target = canonical_target_identity(target)
+    with external_target_lock(target):
+        if not ensure_private_target(target, create=create):
+            fail("--target is missing")
+        lock_parent = target / TARGET_LOCK_DIR_NAME
+        lock_file = lock_parent / TARGET_LOCK_FILE_NAME
+        parent_descriptor: int | None = None
+        lock_descriptor: int | None = None
+        lock_acquired = False
         try:
-            lock_file.lstat()
-        except FileNotFoundError:
-            lock_file_missing = True
-        if (
-            lock_file_missing
-            and stat.S_IMODE(parent_info.st_mode) == OWNER_READ_EXEC_DIR_MODE
-        ):
-            set_directory_fd_mode(
-                parent_descriptor,
-                lock_parent,
-                "target lock parent",
-                OWNER_DIR_MODE,
-            )
-        flags = os.O_RDWR | os.O_CREAT | nofollow_flag("target lock file")
-        if hasattr(os, "O_CLOEXEC"):
-            flags |= os.O_CLOEXEC
-        try:
-            lock_descriptor = os.open(lock_file, flags, OWNER_FILE_MODE)
-        except OSError as exc:
-            fail(f"target lock file cannot be opened safely: {exc}")
-        lock_info = os.fstat(lock_descriptor)
-        if not stat.S_ISREG(lock_info.st_mode):
-            fail("target lock file must be a regular file")
-        if lock_info.st_nlink != 1:
-            fail("target lock file must not have hard-link aliases")
-        if hasattr(os, "geteuid") and owner_of(lock_info) != os.geteuid():
-            fail("target lock file must be owned by the current user")
-        if stat.S_IMODE(lock_info.st_mode) != OWNER_FILE_MODE:
-            if lock_file_missing:
-                os.fchmod(lock_descriptor, OWNER_FILE_MODE)
-                lock_info = os.fstat(lock_descriptor)
-            if stat.S_IMODE(lock_info.st_mode) != OWNER_FILE_MODE:
-                fail("target lock file must be owned by the current user with mode 0600")
-        try:
-            path_info = lock_file.lstat()
-        except FileNotFoundError as exc:
-            raise ConcurrentTargetChange("target lock file disappeared while opening") from exc
-        if (
-            stat.S_ISLNK(path_info.st_mode)
-            or not stat.S_ISREG(path_info.st_mode)
-            or identity_of(path_info) != identity_of(lock_info)
-        ):
-            raise ConcurrentTargetChange("target lock file changed while opening")
-        try:
-            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            fail(f"target is already locked: {lock_file}")
-        lock_acquired = True
-        set_directory_fd_mode(
-            parent_descriptor,
+            lock_parent.mkdir(mode=OWNER_DIR_MODE)
+        except FileExistsError:
+            pass
+        parent_descriptor, parent_info = open_owner_directory_fd(
             lock_parent,
             "target lock parent",
-            OWNER_READ_EXEC_DIR_MODE,
+            {OWNER_DIR_MODE, OWNER_READ_EXEC_DIR_MODE},
         )
-        yield
-    finally:
-        if parent_descriptor is not None and lock_acquired:
-            with contextlib.suppress(FileNotFoundError, OSError, ManagerError):
+        try:
+            lock_file_missing = False
+            try:
+                lock_file.lstat()
+            except FileNotFoundError:
+                lock_file_missing = True
+            if (
+                lock_file_missing
+                and stat.S_IMODE(parent_info.st_mode) == OWNER_READ_EXEC_DIR_MODE
+            ):
                 set_directory_fd_mode(
                     parent_descriptor,
                     lock_parent,
                     "target lock parent",
                     OWNER_DIR_MODE,
                 )
-        if lock_descriptor is not None:
-            if lock_acquired:
-                with contextlib.suppress(OSError):
-                    fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
-            os.close(lock_descriptor)
-        if parent_descriptor is not None:
-            os.close(parent_descriptor)
+            flags = os.O_RDWR | os.O_CREAT | nofollow_flag("target lock file")
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            try:
+                lock_descriptor = os.open(lock_file, flags, OWNER_FILE_MODE)
+            except OSError as exc:
+                fail(f"target lock file cannot be opened safely: {exc}")
+            lock_info = os.fstat(lock_descriptor)
+            if not stat.S_ISREG(lock_info.st_mode):
+                fail("target lock file must be a regular file")
+            if lock_info.st_nlink != 1:
+                fail("target lock file must not have hard-link aliases")
+            if hasattr(os, "geteuid") and owner_of(lock_info) != os.geteuid():
+                fail("target lock file must be owned by the current user")
+            if stat.S_IMODE(lock_info.st_mode) != OWNER_FILE_MODE:
+                if lock_file_missing:
+                    os.fchmod(lock_descriptor, OWNER_FILE_MODE)
+                    lock_info = os.fstat(lock_descriptor)
+                if stat.S_IMODE(lock_info.st_mode) != OWNER_FILE_MODE:
+                    fail("target lock file must be owned by the current user with mode 0600")
+            try:
+                path_info = lock_file.lstat()
+            except FileNotFoundError as exc:
+                raise ConcurrentTargetChange("target lock file disappeared while opening") from exc
+            if (
+                stat.S_ISLNK(path_info.st_mode)
+                or not stat.S_ISREG(path_info.st_mode)
+                or identity_of(path_info) != identity_of(lock_info)
+            ):
+                raise ConcurrentTargetChange("target lock file changed while opening")
+            try:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                fail(f"target is already locked: {lock_file}")
+            lock_acquired = True
+            set_directory_fd_mode(
+                parent_descriptor,
+                lock_parent,
+                "target lock parent",
+                OWNER_READ_EXEC_DIR_MODE,
+            )
+            yield target
+        finally:
+            if parent_descriptor is not None and lock_acquired:
+                with contextlib.suppress(FileNotFoundError, OSError, ManagerError):
+                    set_directory_fd_mode(
+                        parent_descriptor,
+                        lock_parent,
+                        "target lock parent",
+                        OWNER_DIR_MODE,
+                    )
+            if lock_descriptor is not None:
+                if lock_acquired:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+                os.close(lock_descriptor)
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
 
 
 def backup_pool(target: Path) -> Path:
@@ -1979,6 +2182,7 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[str, byte
 
 
 def current_status(target: Path) -> dict[str, Any]:
+    target = canonical_target_identity(target)
     if not ensure_target_directory(target, create=False):
         return {
             "state": "missing",
@@ -2076,7 +2280,7 @@ def require_clean_current(target: Path) -> dict[str, Any]:
 def mutate_setup(target: Path, setup_id: str, profile_id: str, action: str) -> dict[str, Any]:
     setup = render_setup(setup_id)
     profile = render_profile(profile_id)
-    with target_lock(target, create=action != "switch"):
+    with target_lock(target, create=action != "switch") as target:
         ensure_target_directory(target, create=True)
         existing_stamp = load_stamp(target)
         if existing_stamp is None:
@@ -2122,7 +2326,7 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, action: str) -> d
 def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
     setup = render_setup(setup_id)
     profile = render_profile(profile_id)
-    with target_lock(target, create=False):
+    with target_lock(target, create=False) as target:
         existing_stamp = require_clean_managed_any(target)
         if not is_legacy_stamp(existing_stamp):
             fail("migrate requires a legacy managed target")
@@ -2147,7 +2351,7 @@ def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any
 
 
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
-    with target_lock(target, create=False):
+    with target_lock(target, create=False) as target:
         stamp = require_clean_managed_any(target)
         _, files = load_backup(target, slot)
         backup_slot = write_backup(target, stamp)
@@ -2176,7 +2380,7 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
-    with target_lock(target, create=False):
+    with target_lock(target, create=False) as target:
         stamp = require_clean_managed_any(target)
         backup_slot = write_backup(target, stamp)
         before = snapshot_managed_files(target)
@@ -2346,12 +2550,12 @@ def validate_launch_ready_unlocked(target: Path, child_args: list[str]) -> Path:
 
 
 def validate_launch_ready(target: Path, child_args: list[str]) -> Path:
-    with target_lock(target, create=False):
+    with target_lock(target, create=False) as target:
         return validate_launch_ready_unlocked(target, child_args)
 
 
 def launch(target: Path, child_args: list[str]) -> int:
-    with target_lock(target, create=False):
+    with target_lock(target, create=False) as target:
         stamp = launch_ready_stamp_unlocked(target, child_args)
         env = build_launch_env(target)
         with protected_launch_handoff(target):
