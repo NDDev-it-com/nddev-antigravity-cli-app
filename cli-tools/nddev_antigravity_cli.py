@@ -77,6 +77,54 @@ CLEANUP_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
 CLEANUP_STAGE_MAX_BYTES = 2 * CLEANUP_JOURNAL_MAX_BYTES
 OS_RELEASE_MAX_BYTES = 128 * 1024
 OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
+CLEANUP_JOURNAL_KEYS = frozenset(
+    {
+        "schema_version",
+        "product_name",
+        "build_version",
+        "canonical_target",
+        "canonical_target_sha256",
+        "cleanup_parent",
+        "journal_relative",
+        "max_payloads",
+        "reason",
+        "entries",
+    }
+)
+CLEANUP_ENTRY_KEYS = frozenset(
+    {"label", "metadata", "name", "source_kind", "source_relative"}
+)
+CLEANUP_METADATA_KEYS = frozenset(
+    {
+        "kind",
+        "uid",
+        "mode",
+        "nlink",
+        "dev",
+        "ino",
+        "size",
+        "mtime_ns",
+        "entry_count",
+        "byte_count",
+        "objects",
+        "graph_digest_sha256",
+    }
+)
+CLEANUP_OBJECT_KEYS = frozenset(
+    {
+        "relative",
+        "kind",
+        "uid",
+        "mode",
+        "nlink",
+        "dev",
+        "ino",
+        "size",
+        "mtime_ns",
+        "content_sha256",
+        "link_target",
+    }
+)
 AT_FDCWD = -100
 DARWIN_RENAME_EXCL = 0x00000004
 LINUX_RENAME_NOREPLACE = 1
@@ -1694,6 +1742,8 @@ def cleanup_directory_identity(path: Path, label: str) -> dict[str, Any]:
 
 
 def cleanup_metadata_index(metadata: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if set(metadata) != CLEANUP_METADATA_KEYS:
+        fail("cleanup tombstone metadata field set is invalid")
     if metadata.get("kind") not in ("directory", "file", "symlink"):
         fail("cleanup tombstone kind is invalid")
     objects = metadata.get("objects")
@@ -1710,6 +1760,8 @@ def cleanup_metadata_index(metadata: dict[str, Any]) -> dict[str, dict[str, Any]
     for item in objects:
         if not isinstance(item, dict):
             fail("cleanup tombstone object graph is invalid")
+        if set(item) != CLEANUP_OBJECT_KEYS:
+            fail("cleanup tombstone object field set is invalid")
         relative = item.get("relative")
         if not isinstance(relative, str) or not relative:
             fail("cleanup tombstone object relative path is invalid")
@@ -1961,6 +2013,8 @@ def validate_cleanup_journal_document(
     allow_sources: bool = False,
 ) -> dict[str, Any]:
     canonical = str(canonical_target_identity(target))
+    if set(payload) != CLEANUP_JOURNAL_KEYS:
+        fail("cleanup journal field set is invalid")
     if payload.get("schema_version") != CLEANUP_SCHEMA:
         fail("cleanup journal schema is unsupported")
     if payload.get("product_name") != PRODUCT_NAME:
@@ -1986,6 +2040,8 @@ def validate_cleanup_journal_document(
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             fail("cleanup journal entry is invalid")
+        if set(entry) != CLEANUP_ENTRY_KEYS:
+            fail("cleanup journal entry field set is invalid")
         name = entry.get("name")
         if name != cleanup_payload_name(index) or name in names:
             fail("cleanup journal payload binding is invalid")
