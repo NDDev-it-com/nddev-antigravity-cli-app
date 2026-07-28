@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "build_version": "0.2.0",
-  "antigravity_cli_tested": "1.1.7",
-  "antigravity_cli_min": "1.1.7",
-  "antigravity_cli_release_tag": "1.1.7",
-  "antigravity_cli_release_published_at": "2026-07-26T00:43:16Z",
-  "python_requires": ">=3.10",
+  "build_version": "0.2.1",
+  "antigravity_cli_tested": "1.1.8",
+  "antigravity_cli_min": "1.1.8",
+  "antigravity_cli_release_tag": "1.1.8",
+  "antigravity_cli_release_published_at": "2026-07-28T00:59:10Z",
+  "python_requires": ">=3.9",
   "runtime_baseline_ref": "references/antigravity-cli-baseline.json"
 }

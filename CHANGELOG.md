@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- Harden monotonic product and canonical-target coordination, cleanup-pending
+  lifecycle recovery, and read-only no-mutation behavior.
+- Add separate setup update and software remove commands.
+- Update the target-owned Antigravity CLI runtime baseline to the latest
+  official release metadata owned by the machine-readable baseline.
+
 ## 0.2.0
 
 - Replace setup-as-profile layout with one `nddev-builder` content setup and

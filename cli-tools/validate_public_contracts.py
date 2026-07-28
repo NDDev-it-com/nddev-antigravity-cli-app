@@ -22,7 +22,7 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
 PRODUCT_NAME = "nddev-antigravity-cli-app"
-CLI_VERSION = "1.1.7"
+CLI_VERSION = "1.1.8"
 CLAUDE_BRIDGE_DIR = ".claude"
 CLAUDE_BRIDGE_PATH = ".claude/CLAUDE.md"
 CLAUDE_BRIDGE_BYTES = b"@../AGENTS.md\n"
@@ -601,6 +601,8 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             errors.append("VERSION disagrees with build/version.json:build_version")
         if version.get("antigravity_cli_tested") != CLI_VERSION:
             errors.append(f"build/version.json: antigravity_cli_tested must be {CLI_VERSION}")
+        if version.get("python_requires") != ">=3.9":
+            errors.append("build/version.json: python_requires must be >=3.9")
     if manifest is not None:
         if build_version is not None and manifest.get("build_version") != build_version:
             errors.append("build/manifest.json: build_version mismatch")
@@ -705,6 +707,10 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             "unsupported-architecture",
         ]:
             errors.append("build/manifest.json: unsupported host categories mismatch")
+        if platform_support.get("official_unsupported_platforms") != {
+            "windows": ["windows_arm64", "windows_amd64"]
+        }:
+            errors.append("build/manifest.json: official unsupported platforms mismatch")
         backup = manifest.get("backup_policy", {})
         if backup.get("location") != "<target>/.nddev-antigravity-cli-backups":
             errors.append("build/manifest.json: backup location must be target-internal")
@@ -782,10 +788,14 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             "ubuntu-glibc-x64",
         ]:
             errors.append("config/nddev-contract.json: supported host ids mismatch")
+        if platform_support.get("official_unsupported_platforms") != {
+            "windows": ["windows_arm64", "windows_amd64"]
+        }:
+            errors.append("config/nddev-contract.json: official unsupported platforms mismatch")
     if baseline is not None:
         if baseline.get("schema_version") != 2:
             errors.append("baseline schema_version must be 2")
-        if baseline.get("verified_date") != "2026-07-27":
+        if baseline.get("verified_date") != "2026-07-28":
             errors.append("baseline verified_date mismatch")
         if version is not None:
             release = baseline.get("release", {})
@@ -811,6 +821,58 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
                     errors.append(f"baseline {platform_id}: version mismatch")
                 if not re.fullmatch(r"[0-9a-f]{128}", str(meta.get("sha512", ""))):
                     errors.append(f"baseline {platform_id}: missing SHA-512")
+        expected_assets = {
+            "agy_cli_linux_arm64.tar.gz": (
+                "linux_arm64",
+                "supported-vendor-artifact-for-ubuntu-glibc-arm64",
+                49147372,
+                "e75cebb03fce0fcad7d3bb682eb84c356a3c50ff8fb3dc4a89d2051f34fca0ab",
+            ),
+            "agy_cli_linux_x64.tar.gz": (
+                "linux_amd64",
+                "supported-vendor-artifact-for-ubuntu-glibc-x64",
+                52535983,
+                "e92e6215532b3ce84455e341944067753ad90f6d24cebcec8002ce137e5162ce",
+            ),
+            "agy_cli_mac_arm64.tar.gz": (
+                "darwin_arm64",
+                "supported-vendor-artifact-for-macos-arm64",
+                46268913,
+                "622d85db88bcfbf060aa4cbeaadcf2a287420f31236c1efb287409a949ccab25",
+            ),
+            "agy_cli_mac_x64.tar.gz": (
+                "darwin_amd64",
+                "supported-vendor-artifact-for-macos-x64",
+                50542433,
+                "76afe4622132596f68557ef4531ec2e2dcd40e8025f6fb4435a273ce2eec0027",
+            ),
+            "agy_cli_windows_arm64.zip": (
+                "windows_arm64",
+                "official-but-unsupported",
+                43925314,
+                "2e5c5a5b67b4d2a197bc9eb5608f61e6a2f7d602b1012beb7e6b3c158e2a909c",
+            ),
+            "agy_cli_windows_x64.zip": (
+                "windows_amd64",
+                "official-but-unsupported",
+                48081576,
+                "e234c850e3d835d278bb9b4aa202c34d53e399eeebc3d9d1a575576896cdecee",
+            ),
+        }
+        assets = baseline.get("release_assets")
+        if not isinstance(assets, dict) or sorted(assets) != sorted(expected_assets):
+            errors.append("baseline release assets must cover the six official artifacts")
+        else:
+            for name, (platform_id, support, size, digest) in expected_assets.items():
+                meta = assets.get(name, {})
+                if meta.get("platform") != platform_id:
+                    errors.append(f"baseline {name}: platform mismatch")
+                if meta.get("support") != support:
+                    errors.append(f"baseline {name}: support mismatch")
+                if meta.get("size") != size:
+                    errors.append(f"baseline {name}: size mismatch")
+                if meta.get("sha256") != digest:
+                    errors.append(f"baseline {name}: sha256 mismatch")
         script = baseline.get("install_script", {})
         if not re.fullmatch(r"[0-9a-f]{64}", str(script.get("sha256", ""))):
             errors.append("baseline install_script sha256 missing")
