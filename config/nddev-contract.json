@@ -29,6 +29,7 @@
     "status_command": "python3 cli-tools/nddev_antigravity_cli.py status --target <absolute-home-target> [--json]",
     "plan_command": "python3 cli-tools/nddev_antigravity_cli.py plan [--setup nddev-builder] [--profile full-auto|safe] --target <absolute-home-target> [--json]",
     "install_command": "python3 cli-tools/nddev_antigravity_cli.py install [--setup nddev-builder] [--profile full-auto|safe] --target <absolute-home-target> [--json]",
+    "update_command": "python3 cli-tools/nddev_antigravity_cli.py update --target <absolute-home-target> [--json]",
     "switch_command": "python3 cli-tools/nddev_antigravity_cli.py switch [--setup nddev-builder] [--profile full-auto|safe] --target <absolute-home-target> [--json]",
     "migrate_command": "python3 cli-tools/nddev_antigravity_cli.py migrate [--setup nddev-builder] [--profile full-auto|safe] --target <absolute-home-target> [--json]",
     "restore_command": "python3 cli-tools/nddev_antigravity_cli.py restore --backup <0..9> --target <absolute-home-target> [--json]",
@@ -45,14 +46,16 @@
     "status_command": "python3 cli-tools/nddev_antigravity_cli.py software-status --target <absolute-home-target> [--json]",
     "install_command": "python3 cli-tools/nddev_antigravity_cli.py install-cli --target <absolute-home-target> [--json]",
     "update_command": "python3 cli-tools/nddev_antigravity_cli.py update-cli --target <absolute-home-target> [--json]",
+    "remove_command": "python3 cli-tools/nddev_antigravity_cli.py remove-cli --target <absolute-home-target> [--json]",
     "status_fields": [
       "installed",
       "current",
-      "drift"
+      "drift",
+      "cleanup_pending"
     ],
     "install_precondition": "absent managed software",
     "update_precondition": "existing managed software",
-    "update_current_behavior": "idempotent no-op without downloading",
+    "update_current_behavior": "idempotent no-op without downloading when cleanup_pending is false",
     "stage_and_atomic_swap": true,
     "rollback_on_failure": true,
     "artifact_reader": "bounded single-member tar extraction; rejects traversal, symlink, hardlink, and device candidates",
@@ -139,8 +142,8 @@
     "requires_current_target_owned_software": true,
     "target_lock_held_through_child": true,
     "target_lock_mechanism": "persistent-target-internal-flock-file",
-    "authoritative_lock_mechanism": "external-bootstrap-flock-file",
-    "external_lock_binding": "product-namespaced-sha256-canonical-target-json",
+    "authoritative_lock_mechanism": "monotonic-product-and-canonical-target-bootstrap-flock-files",
+    "external_lock_binding": "atomic-no-replace-product-namespaced-json",
     "external_lock_persistent": true,
     "external_lock_exposed_to_child": false,
     "target_internal_lock_role": "target-local-state",
@@ -183,6 +186,35 @@
     "backup_pool_location": ".nddev-antigravity-cli-backups",
     "backup_pool_lock": ".nddev-antigravity-cli-backups-lock",
     "target_lock": ".nddev-antigravity-cli-lock"
+  },
+  "cleanup_policy": {
+    "journal": "NDDEV-ANTIGRAVITY-CLI-CLEANUP.json",
+    "stage": "NDDEV-ANTIGRAVITY-CLI-CLEANUP-STAGE.json",
+    "parent": ".nddev-antigravity-cli-cleanup",
+    "immutable_pending_journal": true,
+    "read_only_repairs": false,
+    "mutation_drains_before_active_changes": true,
+    "top_level_result_field": "cleanup_pending"
+  },
+  "platform_support": {
+    "supported_hosts": [
+      "macos-arm64",
+      "macos-x64",
+      "ubuntu-glibc-arm64",
+      "ubuntu-glibc-x64"
+    ],
+    "unsupported_categories": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
+    "official_platform_mapping": {
+      "macos-arm64": "darwin_arm64",
+      "macos-x64": "darwin_amd64",
+      "ubuntu-glibc-arm64": "linux_arm64",
+      "ubuntu-glibc-x64": "linux_amd64"
+    }
   },
   "runtime_compatibility": {
     "product": "Antigravity CLI",

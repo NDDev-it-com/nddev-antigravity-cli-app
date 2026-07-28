@@ -622,7 +622,14 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
         if manifest.get("builder", {}).get("default_mcp_servers") is not False:
             errors.append("build/manifest.json: default MCP servers must be false")
         policy = manifest.get("command_policy", {})
-        for command in ("migrate", "software-status", "install-cli", "update-cli"):
+        for command in (
+            "update",
+            "migrate",
+            "software-status",
+            "install-cli",
+            "update-cli",
+            "remove-cli",
+        ):
             if command not in policy.get("json_supported", []):
                 errors.append(f"build/manifest.json: command_policy missing {command}")
         launch = manifest.get("runtime_launch", {})
@@ -637,9 +644,12 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
                 errors.append(f"build/manifest.json: runtime_launch.{key} must be true")
         if launch.get("target_lock_mechanism") != "persistent-target-internal-flock-file":
             errors.append("build/manifest.json: target lock mechanism mismatch")
-        if launch.get("authoritative_lock_mechanism") != "external-bootstrap-flock-file":
+        if (
+            launch.get("authoritative_lock_mechanism")
+            != "monotonic-product-and-canonical-target-bootstrap-flock-files"
+        ):
             errors.append("build/manifest.json: authoritative lock mechanism mismatch")
-        if launch.get("external_lock_binding") != "product-namespaced-sha256-canonical-target-json":
+        if launch.get("external_lock_binding") != "atomic-no-replace-product-namespaced-json":
             errors.append("build/manifest.json: external lock binding mismatch")
         if launch.get("external_lock_persistent") is not True:
             errors.append("build/manifest.json: external lock persistence must be true")
@@ -669,8 +679,32 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             errors.append("build/manifest.json: platform manifest ids mismatch")
         if software.get("artifact_pin_fields") != ["version", "url", "sha512"]:
             errors.append("build/manifest.json: artifact pin fields mismatch")
+        if "remove-cli" not in str(software.get("remove_command")):
+            errors.append("build/manifest.json: software remove command mismatch")
         if software.get("npm") is not None or software.get("pip") is not None:
             errors.append("build/manifest.json: npm/pip must stay null")
+        cleanup = manifest.get("cleanup_policy", {})
+        if cleanup.get("immutable_pending_journal") is not True:
+            errors.append("build/manifest.json: cleanup journal must be immutable pending")
+        if cleanup.get("read_only_repairs") is not False:
+            errors.append("build/manifest.json: read-only cleanup repair must be false")
+        if cleanup.get("top_level_result_field") != "cleanup_pending":
+            errors.append("build/manifest.json: cleanup result field mismatch")
+        platform_support = manifest.get("platform_support", {})
+        if platform_support.get("supported_hosts") != [
+            "macos-arm64",
+            "macos-x64",
+            "ubuntu-glibc-arm64",
+            "ubuntu-glibc-x64",
+        ]:
+            errors.append("build/manifest.json: supported host ids mismatch")
+        if platform_support.get("unsupported_categories") != [
+            "windows",
+            "non-ubuntu-linux",
+            "linux-musl",
+            "unsupported-architecture",
+        ]:
+            errors.append("build/manifest.json: unsupported host categories mismatch")
         backup = manifest.get("backup_policy", {})
         if backup.get("location") != "<target>/.nddev-antigravity-cli-backups":
             errors.append("build/manifest.json: backup location must be target-internal")
@@ -705,9 +739,12 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
                 errors.append(f"config/nddev-contract.json: runtime_launch.{key} must be true")
         if launch.get("target_lock_mechanism") != "persistent-target-internal-flock-file":
             errors.append("config/nddev-contract.json: target lock mechanism mismatch")
-        if launch.get("authoritative_lock_mechanism") != "external-bootstrap-flock-file":
+        if (
+            launch.get("authoritative_lock_mechanism")
+            != "monotonic-product-and-canonical-target-bootstrap-flock-files"
+        ):
             errors.append("config/nddev-contract.json: authoritative lock mechanism mismatch")
-        if launch.get("external_lock_binding") != "product-namespaced-sha256-canonical-target-json":
+        if launch.get("external_lock_binding") != "atomic-no-replace-product-namespaced-json":
             errors.append("config/nddev-contract.json: external lock binding mismatch")
         if launch.get("external_lock_persistent") is not True:
             errors.append("config/nddev-contract.json: external lock persistence must be true")
@@ -732,6 +769,19 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             errors.append("config/nddev-contract.json: backup pool must be target-internal")
         if safety.get("backup_pool_lock") != ".nddev-antigravity-cli-backups-lock":
             errors.append("config/nddev-contract.json: backup pool lock must be target-internal")
+        cleanup = contract.get("cleanup_policy", {})
+        if cleanup.get("immutable_pending_journal") is not True:
+            errors.append("config/nddev-contract.json: cleanup journal must be immutable pending")
+        if cleanup.get("read_only_repairs") is not False:
+            errors.append("config/nddev-contract.json: read-only cleanup repair must be false")
+        platform_support = contract.get("platform_support", {})
+        if platform_support.get("supported_hosts") != [
+            "macos-arm64",
+            "macos-x64",
+            "ubuntu-glibc-arm64",
+            "ubuntu-glibc-x64",
+        ]:
+            errors.append("config/nddev-contract.json: supported host ids mismatch")
     if baseline is not None:
         if baseline.get("schema_version") != 2:
             errors.append("baseline schema_version must be 2")
@@ -840,11 +890,83 @@ def check_manager_constants(errors: list[str], build_version: str | None) -> Non
     for meta in manager.OFFICIAL_MANIFESTS.values():
         if set(meta) != {"version", "url", "sha512"}:
             errors.append("manager official manifest fields mismatch")
+    if tuple(manager.SUPPORTED_PUBLIC_HOSTS) != (
+        "macos-arm64",
+        "macos-x64",
+        "ubuntu-glibc-arm64",
+        "ubuntu-glibc-x64",
+    ):
+        errors.append("manager supported public hosts mismatch")
+    if manager.OFFICIAL_PLATFORM_BY_HOST != {
+        "macos-arm64": "darwin_arm64",
+        "macos-x64": "darwin_amd64",
+        "ubuntu-glibc-arm64": "linux_arm64",
+        "ubuntu-glibc-x64": "linux_amd64",
+    }:
+        errors.append("manager host-to-official platform mapping mismatch")
+    original_platform = manager.sys.platform
+    original_uname = manager.os.uname
+    original_libc_ver = manager.py_platform.libc_ver
+    original_linux_os_release = manager.linux_os_release
+
+    class FakeUname:
+        def __init__(self, machine: str) -> None:
+            self.machine = machine
+
+    try:
+        manager.sys.platform = "darwin"
+        manager.os.uname = lambda: FakeUname("arm64")
+        if manager.current_host_id() != "macos-arm64":
+            errors.append("manager macOS arm64 host id mismatch")
+        manager.os.uname = lambda: FakeUname("x86_64")
+        if manager.current_host_id() != "macos-x64":
+            errors.append("manager macOS x64 host id mismatch")
+
+        manager.sys.platform = "linux"
+        manager.py_platform.libc_ver = lambda: ("glibc", "2.35")
+        manager.linux_os_release = lambda: {"ID": "ubuntu"}
+        manager.os.uname = lambda: FakeUname("aarch64")
+        if manager.current_host_id() != "ubuntu-glibc-arm64":
+            errors.append("manager Ubuntu arm64 host id mismatch")
+        manager.os.uname = lambda: FakeUname("amd64")
+        if manager.current_platform_key() != "linux_amd64":
+            errors.append("manager Ubuntu x64 official platform mismatch")
+
+        manager.linux_os_release = lambda: {"ID": "debian"}
+        expect_manager_error(
+            errors,
+            "manager rejects non-Ubuntu Linux",
+            manager,
+            manager.current_host_id,
+        )
+        manager.linux_os_release = lambda: {"ID": "ubuntu"}
+        manager.py_platform.libc_ver = lambda: ("musl", "1.2")
+        expect_manager_error(
+            errors,
+            "manager rejects musl Linux",
+            manager,
+            manager.current_host_id,
+        )
+        manager.sys.platform = "win32"
+        manager.py_platform.libc_ver = original_libc_ver
+        expect_manager_error(
+            errors,
+            "manager rejects Windows",
+            manager,
+            manager.current_host_id,
+        )
+    finally:
+        manager.sys.platform = original_platform
+        manager.os.uname = original_uname
+        manager.py_platform.libc_ver = original_libc_ver
+        manager.linux_os_release = original_linux_os_release
     for argv in (
         ["list", "--json"],
         ["plan", "--target", "/tmp/nddev-antigravity-cli"],
         ["install", "--profile", "safe", "--target", "/tmp/nddev-antigravity-cli"],
+        ["update", "--target", "/tmp/nddev-antigravity-cli"],
         ["migrate", "--target", "/tmp/nddev-antigravity-cli"],
+        ["remove-cli", "--target", "/tmp/nddev-antigravity-cli"],
     ):
         try:
             manager.parse_args(argv)
@@ -912,8 +1034,9 @@ def check_runtime_lock_source(errors: list[str]) -> None:
         "system_temp_root",
         "external_lock_binding",
         "require_external_lock_file_identity",
-        "validate_or_write_external_lock_binding",
-        "Path(\"/tmp\").resolve(strict=True)",
+        "validate_external_lock_binding",
+        "atomic_rename_no_replace",
+        "BOOTSTRAP_GLOBAL_LOCK_NAME",
         "protected_launch_handoff",
         "subprocess.Popen",
     )
@@ -1453,7 +1576,9 @@ def check_launch_separator_stripping(errors: list[str], manager: Any) -> None:
 def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any) -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
-        target = manager.resolve_target(str(root / "launch-lock-target"))
+        target = manager.canonical_target_identity(
+            manager.resolve_target(str(root / "launch-lock-target"))
+        )
         ready = root / "child-ready"
         stop = root / "child-stop"
         capture = root / "child-capture.json"
@@ -1638,7 +1763,9 @@ def check_launch_lock_blocks_lifecycle_mutations(errors: list[str], manager: Any
 def check_external_lock_blocks_internal_lock_rename(errors: list[str], manager: Any) -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
-        target = manager.resolve_target(str(root / "internal-rename-target"))
+        target = manager.canonical_target_identity(
+            manager.resolve_target(str(root / "internal-rename-target"))
+        )
         ready = root / "rename-child-ready"
         stop = root / "rename-child-stop"
         capture = root / "rename-child-capture.json"
@@ -1789,7 +1916,7 @@ def check_external_lock_three_process_handover(errors: list[str], manager: Any) 
                     report_c = json.loads(result_c.read_text(encoding="utf-8"))
                     if report_c.get("acquired") is not False:
                         errors.append(f"external lock handover: C unexpectedly acquired lock: {report_c}")
-                    if "externally locked" not in str(report_c.get("error")):
+                    if "already locked" not in str(report_c.get("error")):
                         errors.append(f"external lock handover: C error mismatch: {report_c}")
                 release_b.write_text("release\n", encoding="utf-8")
                 if wait_for_pid(pid_b, errors, "external lock handover B") != 0:
@@ -2074,19 +2201,16 @@ def check_no_current_forbidden_surfaces(errors: list[str]) -> None:
     ):
         if (ROOT / forbidden_path).exists():
             errors.append(f"retired setup path must be absent: {forbidden_path}")
-    for relative in (
-        "README.md",
-        "docs/software-lifecycle.md",
-        "config/nddev-contract.json",
-        "build/manifest.json",
-        "references/antigravity-cli-baseline.json",
-    ):
+    for relative in ("README.md", "docs/software-lifecycle.md"):
         text = read_text(relative, errors)
         if text is None:
             continue
         unsupported_platform = "Win" + "dows"
-        if unsupported_platform in text or unsupported_platform.lower() in text:
-            errors.append(f"{relative}: unsupported platform support text must be absent")
+        lower_text = text.lower()
+        if (
+            unsupported_platform in text or unsupported_platform.lower() in lower_text
+        ) and "unsupported" not in lower_text:
+            errors.append(f"{relative}: Windows text must be explicitly unsupported")
         retired_profile = "bal" + "anced"
         if retired_profile in text:
             errors.append(f"{relative}: retired setup/profile text must be absent")
