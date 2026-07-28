@@ -2448,12 +2448,12 @@ def delete_cleanup_payload_bottom_up(payload: Path, label: str, metadata: dict[s
 
 
 def drain_cleanup_journal(target: Path, *, pending_on_failure: bool) -> bool:
+    recover_cleanup_promotion_stage(target)
+    journal = validate_cleanup_journal(target)
+    if journal is None:
+        return False
+    root = cleanup_root(target)
     try:
-        recover_cleanup_promotion_stage(target)
-        journal = validate_cleanup_journal(target)
-        if journal is None:
-            return False
-        root = cleanup_root(target)
         for entry in journal["entries"]:
             payload = root / entry["name"]
             if not lstat_exists(payload):
