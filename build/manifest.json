@@ -128,6 +128,7 @@
     "target_lock_mechanism": "persistent-target-internal-flock-file",
     "authoritative_lock_mechanism": "monotonic-product-and-canonical-target-bootstrap-flock-files",
     "read_only_cold_orphan_target_anchors_fail_closed": true,
+    "read_only_cold_product_namespace_must_be_empty_without_global_lock": true,
     "external_lock_binding": "atomic-no-replace-product-namespaced-json",
     "external_lock_persistent": true,
     "external_lock_exposed_to_child": false,

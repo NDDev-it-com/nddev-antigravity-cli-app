@@ -64,6 +64,10 @@ TARGET_LOCK_FILE_NAME = "lock"
 EXTERNAL_LOCK_POOL_PREFIX = "nddev-antigravity-cli-app-bootstrap-locks"
 BOOTSTRAP_GLOBAL_LOCK_NAME = "global.lock"
 EXTERNAL_LOCK_FILE_SCHEMA = 1
+EXTERNAL_LOCK_TARGET_NAME_RE = re.compile(r"^[0-9a-f]{64}\.lock$")
+EXTERNAL_LOCK_PUBLICATION_ALIAS_RE = re.compile(
+    r"^\.(global\.lock|[0-9a-f]{64}\.lock)\.nddev\.tmp\.[0-9]+\.[0-9]+$"
+)
 CLEANUP_DIR_NAME = ".nddev-antigravity-cli-cleanup"
 CLEANUP_JOURNAL_NAME = "NDDEV-ANTIGRAVITY-CLI-CLEANUP.json"
 CLEANUP_STAGE_NAME = "NDDEV-ANTIGRAVITY-CLI-CLEANUP-STAGE.json"
@@ -1332,7 +1336,7 @@ def open_existing_external_lock_file(path: Path, binding: dict[str, Any]) -> int
 
 
 def external_lock_file_state_token(
-    path: Path, binding: dict[str, Any], label: str
+    path: Path, binding: dict[str, Any] | None, label: str
 ) -> tuple[Any, ...] | None:
     try:
         before = path.lstat()
@@ -1349,7 +1353,12 @@ def external_lock_file_state_token(
         fail(f"{label} cannot be opened safely: {exc}")
     try:
         lock_info = require_external_lock_file_identity(descriptor, path, label)
-        validate_external_lock_binding(descriptor, binding)
+        content = read_lock_file_descriptor(descriptor, label)
+        if not content:
+            fail(f"{label} is empty")
+        observed = parse_json_object(content, label)
+        if binding is not None and observed != binding:
+            fail(f"{label} mismatch")
         return (
             lock_info.st_dev,
             lock_info.st_ino,
@@ -1358,6 +1367,7 @@ def external_lock_file_state_token(
             owner_of(lock_info),
             lock_info.st_size,
             lock_info.st_mtime_ns,
+            sha256_bytes(content),
         )
     finally:
         os.close(descriptor)
@@ -1550,23 +1560,46 @@ def external_global_anchor_exists() -> bool:
         return False
 
 
-def external_lock_publication_aliases(product_root: Path, anchor_path: Path) -> list[Path]:
-    prefix = f".{anchor_path.name}.nddev.tmp."
-    matches: list[Path] = []
+def external_lock_namespace_entry_role(name: str) -> str:
+    if name == BOOTSTRAP_GLOBAL_LOCK_NAME:
+        return "global-final"
+    if EXTERNAL_LOCK_TARGET_NAME_RE.fullmatch(name):
+        return "target-final"
+    if EXTERNAL_LOCK_PUBLICATION_ALIAS_RE.fullmatch(name):
+        if name.startswith(f".{BOOTSTRAP_GLOBAL_LOCK_NAME}.nddev.tmp."):
+            return "global-alias"
+        return "target-alias"
+    return "unknown"
+
+
+def scan_external_lock_namespace(
+    product_root: Path,
+) -> tuple[tuple[str, str, tuple[Any, ...]], ...]:
+    entries: list[tuple[str, str, tuple[Any, ...]]] = []
     scanned = 0
     try:
-        children = product_root.iterdir()
-        for child in children:
-            scanned += 1
-            if scanned > EXTERNAL_LOCK_COLD_READ_SCAN_MAX:
-                fail("bootstrap lifecycle lock pool exceeds the bounded cold-read scan")
-            if child.name.startswith(prefix):
-                matches.append(child)
+        children = sorted(product_root.iterdir(), key=lambda item: item.name)
     except FileNotFoundError:
         raise BootstrapColdReadRace()
     except OSError as exc:
         fail(f"bootstrap lifecycle lock pool cannot be inspected safely: {exc}")
-    return sorted(matches, key=lambda item: item.name)
+    for child in children:
+        scanned += 1
+        if scanned > EXTERNAL_LOCK_COLD_READ_SCAN_MAX:
+            fail("bootstrap lifecycle lock pool exceeds the bounded cold-read scan")
+        if len(child.name.encode("utf-8", "surrogateescape")) > 255:
+            fail("bootstrap lifecycle lock pool entry name exceeds the bounded name limit")
+        role = external_lock_namespace_entry_role(child.name)
+        binding = external_global_lock_binding() if role == "global-final" else None
+        token = external_lock_file_state_token(
+            child,
+            binding,
+            f"bootstrap lifecycle lock pool entry {child.name}",
+        )
+        if token is None:
+            raise BootstrapColdReadRace()
+        entries.append((child.name, role, token))
+    return tuple(entries)
 
 
 def cold_read_external_namespace_snapshot(
@@ -1590,48 +1623,25 @@ def cold_read_external_namespace_snapshot(
         opened_root.st_dev,
         opened_root.st_ino,
         stat.S_IMODE(opened_root.st_mode),
+        opened_root.st_nlink,
         owner_of(opened_root),
         opened_root.st_mtime_ns,
     )
-    global_token = external_lock_file_state_token(
-        product_root / BOOTSTRAP_GLOBAL_LOCK_NAME,
-        external_global_lock_binding(),
-        "bootstrap global lifecycle lock file",
-    )
-    if global_token is not None and fail_on_orphan_target_state:
-        raise BootstrapColdReadRace()
-    anchor_tokens: list[tuple[str, tuple[Any, ...] | None]] = []
-    for role, path, binding in (
-        (
-            "canonical",
-            product_root / f"{external_lock_digest(canonical)}.lock",
-            external_lock_binding(canonical),
-        ),
-        (
-            "lexical",
-            product_root / f"{lexical_external_lock_digest(lexical)}.lock",
-            lexical_external_lock_binding(lexical),
-        ),
-    ):
-        token = external_lock_file_state_token(
-            path, binding, f"{role} bootstrap target lifecycle lock file"
-        )
-        if token is not None and fail_on_orphan_target_state:
-            fail(f"read-only {role} target lifecycle lock exists without product coordination")
-        anchor_tokens.append((f"{role}:final", token))
-        aliases = external_lock_publication_aliases(product_root, path)
-        if aliases and fail_on_orphan_target_state:
-            fail(f"read-only {role} target lifecycle lock has incomplete publication aliases")
-        if len(aliases) > 1:
-            fail(f"read-only {role} target lifecycle lock has multiple publication aliases")
-        for alias in aliases:
-            alias_token = external_lock_file_state_token(
-                alias,
-                binding,
-                f"{role} bootstrap target lifecycle lock publication alias",
-            )
-            anchor_tokens.append((f"{role}:alias:{alias.name}", alias_token))
-    return ("pool-present", root_token, global_token, tuple(anchor_tokens))
+    entries = scan_external_lock_namespace(product_root)
+    if fail_on_orphan_target_state:
+        for name, role, _token in entries:
+            if role == "global-final":
+                raise BootstrapColdReadRace()
+            if role == "global-alias":
+                fail(
+                    "read-only bootstrap product lifecycle lock has an incomplete publication alias"
+                )
+            if role == "target-final":
+                fail("read-only target lifecycle lock exists without product coordination")
+            if role == "target-alias":
+                fail("read-only target lifecycle lock has an incomplete publication alias")
+            fail(f"read-only bootstrap lifecycle lock pool has an unknown entry: {name}")
+    return ("pool-present", root_token, entries)
 
 
 @contextlib.contextmanager

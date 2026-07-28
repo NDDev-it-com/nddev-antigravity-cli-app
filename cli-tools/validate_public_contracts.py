@@ -662,6 +662,11 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             errors.append("build/manifest.json: authoritative lock mechanism mismatch")
         if launch.get("read_only_cold_orphan_target_anchors_fail_closed") is not True:
             errors.append("build/manifest.json: read-only cold orphan target anchor policy missing")
+        if (
+            launch.get("read_only_cold_product_namespace_must_be_empty_without_global_lock")
+            is not True
+        ):
+            errors.append("build/manifest.json: read-only cold product namespace policy missing")
         if launch.get("external_lock_binding") != "atomic-no-replace-product-namespaced-json":
             errors.append("build/manifest.json: external lock binding mismatch")
         if launch.get("external_lock_persistent") is not True:
@@ -761,6 +766,13 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             != "monotonic-product-and-canonical-target-bootstrap-flock-files"
         ):
             errors.append("config/nddev-contract.json: authoritative lock mechanism mismatch")
+        if (
+            launch.get("read_only_cold_product_namespace_must_be_empty_without_global_lock")
+            is not True
+        ):
+            errors.append(
+                "config/nddev-contract.json: read-only cold product namespace policy missing"
+            )
         if launch.get("external_lock_binding") != "atomic-no-replace-product-namespaced-json":
             errors.append("config/nddev-contract.json: external lock binding mismatch")
         if launch.get("external_lock_persistent") is not True:
@@ -787,6 +799,13 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
         if safety.get("read_only_cold_orphan_target_anchors_fail_closed") is not True:
             errors.append(
                 "config/nddev-contract.json: read-only cold orphan target anchor policy missing"
+            )
+        if (
+            safety.get("read_only_cold_product_namespace_must_be_empty_without_global_lock")
+            is not True
+        ):
+            errors.append(
+                "config/nddev-contract.json: read-only cold product namespace policy missing"
             )
         if safety.get("backup_pool_location") != ".nddev-antigravity-cli-backups":
             errors.append("config/nddev-contract.json: backup pool must be target-internal")
@@ -1145,12 +1164,20 @@ def check_read_only_cold_bootstrap_source(errors: list[str]) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     target_lock = functions.get("target_lock")
+    read_only_payload = functions.get("read_only_target_payload")
     cold_snapshot = functions.get("cold_read_external_namespace_snapshot")
+    namespace_scan = functions.get("scan_external_lock_namespace")
     if target_lock is None:
         errors.append("manager source missing target_lock")
         return
+    if read_only_payload is None:
+        errors.append("manager source missing read_only_target_payload")
+        return
     if cold_snapshot is None:
         errors.append("manager source missing cold read external namespace snapshot")
+        return
+    if namespace_scan is None:
+        errors.append("manager source missing cold read external namespace scanner")
         return
 
     target_names = {node.id for node in ast.walk(target_lock) if isinstance(node, ast.Name)}
@@ -1168,6 +1195,10 @@ def check_read_only_cold_bootstrap_source(errors: list[str]) -> None:
     }
     if "external_global_anchor_exists" in target_calls:
         errors.append("target_lock must not use stale global-only cold-read retry checks")
+    payload_names = {node.id for node in ast.walk(read_only_payload) if isinstance(node, ast.Name)}
+    for required in ("BootstrapColdReadRace", "callback", "target_lock"):
+        if required not in payload_names:
+            errors.append(f"read_only_target_payload missing stale-result retry guard: {required}")
 
     snapshot_calls = {
         node.func.id
@@ -1176,11 +1207,21 @@ def check_read_only_cold_bootstrap_source(errors: list[str]) -> None:
     }
     for required in (
         "open_owner_directory_fd",
-        "external_lock_file_state_token",
-        "external_lock_publication_aliases",
+        "scan_external_lock_namespace",
     ):
         if required not in snapshot_calls:
             errors.append(f"cold read snapshot missing bounded no-create validation: {required}")
+    scan_calls = {
+        node.func.id
+        for node in ast.walk(namespace_scan)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    for required in (
+        "external_lock_namespace_entry_role",
+        "external_lock_file_state_token",
+    ):
+        if required not in scan_calls:
+            errors.append(f"cold read scanner missing product namespace validation: {required}")
     for forbidden in (
         "open_external_global_lock",
         "create_external_lock_file_atomic",
@@ -1191,6 +1232,8 @@ def check_read_only_cold_bootstrap_source(errors: list[str]) -> None:
     ):
         if forbidden in snapshot_calls:
             errors.append(f"cold read snapshot must not mutate or repair namespace: {forbidden}")
+        if forbidden in scan_calls:
+            errors.append(f"cold read scanner must not mutate or repair namespace: {forbidden}")
 
 
 def expect_manager_error(
