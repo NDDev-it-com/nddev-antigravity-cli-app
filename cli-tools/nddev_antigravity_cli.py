@@ -57,6 +57,7 @@ OWNER_EXEC_MODE = 0o700
 METADATA_MAX_BYTES = 256 * 1024
 MANAGED_PAYLOAD_MAX_BYTES = 1024 * 1024
 SOFTWARE_ARTIFACT_MAX_BYTES = 300 * 1024 * 1024
+EXTERNAL_LOCK_COLD_READ_SCAN_MAX = 4096
 DEFAULT_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 TARGET_LOCK_DIR_NAME = ".nddev-antigravity-cli-lock"
 TARGET_LOCK_FILE_NAME = "lock"
@@ -91,9 +92,7 @@ CLEANUP_JOURNAL_KEYS = frozenset(
         "entries",
     }
 )
-CLEANUP_ENTRY_KEYS = frozenset(
-    {"label", "metadata", "name", "source_kind", "source_relative"}
-)
+CLEANUP_ENTRY_KEYS = frozenset({"label", "metadata", "name", "source_kind", "source_relative"})
 CLEANUP_METADATA_KEYS = frozenset(
     {
         "kind",
@@ -155,9 +154,7 @@ OFFICIAL_UNSUPPORTED_PLATFORMS = {
 }
 
 INSTALL_SCRIPT_URL = "https://antigravity.google/cli/install.sh"
-INSTALL_SCRIPT_SHA256 = (
-    "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640"
-)
+INSTALL_SCRIPT_SHA256 = "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640"
 MANIFEST_URL_TEMPLATE = (
     "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/"
     "manifests/{platform}.json"
@@ -866,7 +863,7 @@ def source_for_builder_target(relative: str) -> str:
     prefix = f"{BUILDER_ROOT}/"
     if not relative.startswith(prefix):
         fail(f"builder file is outside the plugin root: {relative}")
-    return f"plugins/nddev-builder/{relative[len(prefix):]}"
+    return f"plugins/nddev-builder/{relative[len(prefix) :]}"
 
 
 def validate_text_payload(content: bytes, label: str) -> None:
@@ -1334,6 +1331,38 @@ def open_existing_external_lock_file(path: Path, binding: dict[str, Any]) -> int
         raise
 
 
+def external_lock_file_state_token(
+    path: Path, binding: dict[str, Any], label: str
+) -> tuple[Any, ...] | None:
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        fail(f"{label} must be a regular non-symlink file")
+    flags = os.O_RDONLY | nofollow_flag(label)
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        fail(f"{label} cannot be opened safely: {exc}")
+    try:
+        lock_info = require_external_lock_file_identity(descriptor, path, label)
+        validate_external_lock_binding(descriptor, binding)
+        return (
+            lock_info.st_dev,
+            lock_info.st_ino,
+            stat.S_IMODE(lock_info.st_mode),
+            lock_info.st_nlink,
+            owner_of(lock_info),
+            lock_info.st_size,
+            lock_info.st_mtime_ns,
+        )
+    finally:
+        os.close(descriptor)
+
+
 def create_external_lock_file_atomic(path: Path, binding: dict[str, Any], root: Path) -> int:
     if root not in path.parents:
         fail("external lifecycle lock escaped product root")
@@ -1519,6 +1548,90 @@ def external_global_anchor_exists() -> bool:
         return lstat_exists(external_lock_pool_path() / BOOTSTRAP_GLOBAL_LOCK_NAME)
     except ManagerError:
         return False
+
+
+def external_lock_publication_aliases(product_root: Path, anchor_path: Path) -> list[Path]:
+    prefix = f".{anchor_path.name}.nddev.tmp."
+    matches: list[Path] = []
+    scanned = 0
+    try:
+        children = product_root.iterdir()
+        for child in children:
+            scanned += 1
+            if scanned > EXTERNAL_LOCK_COLD_READ_SCAN_MAX:
+                fail("bootstrap lifecycle lock pool exceeds the bounded cold-read scan")
+            if child.name.startswith(prefix):
+                matches.append(child)
+    except FileNotFoundError:
+        raise BootstrapColdReadRace()
+    except OSError as exc:
+        fail(f"bootstrap lifecycle lock pool cannot be inspected safely: {exc}")
+    return sorted(matches, key=lambda item: item.name)
+
+
+def cold_read_external_namespace_snapshot(
+    canonical: Path,
+    lexical: Path,
+    *,
+    fail_on_orphan_target_state: bool,
+) -> tuple[Any, ...]:
+    product_root = external_lock_pool_path()
+    try:
+        product_root.lstat()
+    except FileNotFoundError:
+        return ("pool-absent",)
+    descriptor, opened_root = open_owner_directory_fd(
+        product_root,
+        "bootstrap lifecycle lock pool",
+        {OWNER_DIR_MODE},
+    )
+    os.close(descriptor)
+    root_token = (
+        opened_root.st_dev,
+        opened_root.st_ino,
+        stat.S_IMODE(opened_root.st_mode),
+        owner_of(opened_root),
+        opened_root.st_mtime_ns,
+    )
+    global_token = external_lock_file_state_token(
+        product_root / BOOTSTRAP_GLOBAL_LOCK_NAME,
+        external_global_lock_binding(),
+        "bootstrap global lifecycle lock file",
+    )
+    if global_token is not None and fail_on_orphan_target_state:
+        raise BootstrapColdReadRace()
+    anchor_tokens: list[tuple[str, tuple[Any, ...] | None]] = []
+    for role, path, binding in (
+        (
+            "canonical",
+            product_root / f"{external_lock_digest(canonical)}.lock",
+            external_lock_binding(canonical),
+        ),
+        (
+            "lexical",
+            product_root / f"{lexical_external_lock_digest(lexical)}.lock",
+            lexical_external_lock_binding(lexical),
+        ),
+    ):
+        token = external_lock_file_state_token(
+            path, binding, f"{role} bootstrap target lifecycle lock file"
+        )
+        if token is not None and fail_on_orphan_target_state:
+            fail(f"read-only {role} target lifecycle lock exists without product coordination")
+        anchor_tokens.append((f"{role}:final", token))
+        aliases = external_lock_publication_aliases(product_root, path)
+        if aliases and fail_on_orphan_target_state:
+            fail(f"read-only {role} target lifecycle lock has incomplete publication aliases")
+        if len(aliases) > 1:
+            fail(f"read-only {role} target lifecycle lock has multiple publication aliases")
+        for alias in aliases:
+            alias_token = external_lock_file_state_token(
+                alias,
+                binding,
+                f"{role} bootstrap target lifecycle lock publication alias",
+            )
+            anchor_tokens.append((f"{role}:alias:{alias.name}", alias_token))
+    return ("pool-present", root_token, global_token, tuple(anchor_tokens))
 
 
 @contextlib.contextmanager
@@ -1947,7 +2060,9 @@ def cleanup_stage_payload(
                 "label": label,
                 "source_relative": relative_to_target(target, path),
                 "source_parent_relative": relative_to_target(target, source_parent),
-                "source_parent_identity": cleanup_directory_identity(source_parent, f"{label} parent"),
+                "source_parent_identity": cleanup_directory_identity(
+                    source_parent, f"{label} parent"
+                ),
                 "destination_relative": name,
             }
         )
@@ -1984,7 +2099,9 @@ def build_cleanup_stage_projection(
     return stage, data
 
 
-def cleanup_pending_summary_from_journal(target: Path, journal: dict[str, Any] | None) -> dict[str, Any]:
+def cleanup_pending_summary_from_journal(
+    target: Path, journal: dict[str, Any] | None
+) -> dict[str, Any]:
     if journal is None:
         return {"state": "absent", "entries": 0}
     entries = journal.get("entries")
@@ -2279,7 +2396,9 @@ def publish_cleanup_stage_no_replace(path: Path, data: bytes, target: Path) -> N
 
 
 def validate_published_cleanup_journal(path: Path, data: bytes, target: Path) -> None:
-    current = read_existing_file(path, max_bytes=CLEANUP_JOURNAL_MAX_BYTES, label=CLEANUP_JOURNAL_NAME)
+    current = read_existing_file(
+        path, max_bytes=CLEANUP_JOURNAL_MAX_BYTES, label=CLEANUP_JOURNAL_NAME
+    )
     if current != data:
         fail("cleanup journal publication failed content verification")
     journal = validate_cleanup_journal(target, allow_stage=True)
@@ -2356,7 +2475,9 @@ def promote_cleanup_items(
     if lstat_exists(cleanup_stage_path(target)):
         fail("cleanup promotion stage already exists")
     journal, journal_data = build_cleanup_journal_projection(target, reason, pending)
-    stage, stage_data = build_cleanup_stage_projection(target, reason, pending, journal, journal_data)
+    stage, stage_data = build_cleanup_stage_projection(
+        target, reason, pending, journal, journal_data
+    )
     promotion = CleanupPromotion(
         target=target,
         journal_path=cleanup_journal_path(target),
@@ -2616,7 +2737,9 @@ def desired_for(target: Path, setup: Setup, profile: Profile) -> dict[str, bytes
     return desired
 
 
-def digest_map_for(files: tuple[str, ...], desired: dict[str, bytes | None]) -> dict[str, str | None]:
+def digest_map_for(
+    files: tuple[str, ...], desired: dict[str, bytes | None]
+) -> dict[str, str | None]:
     result: dict[str, str | None] = {}
     for relative in files:
         content = desired.get(relative)
@@ -2973,9 +3096,7 @@ def read_official_manifest(manifest_url: str) -> dict[str, Any]:
         fail("official manifest version must be a non-empty string")
     if not isinstance(manifest["url"], str) or not manifest["url"].startswith("https://"):
         fail("official manifest url must be an HTTPS URL")
-    if not isinstance(manifest["sha512"], str) or not SHA512_PATTERN.fullmatch(
-        manifest["sha512"]
-    ):
+    if not isinstance(manifest["sha512"], str) or not SHA512_PATTERN.fullmatch(manifest["sha512"]):
         fail("official manifest sha512 must be a lowercase SHA-512 digest")
     return manifest
 
@@ -3220,18 +3341,16 @@ def software_status_locked(target: Path) -> dict[str, Any]:
         for label, content in (
             ("bin/agy", binary_content),
             (
-                str(
-                    Path(".nddev-software/antigravity-cli/versions")
-                    / CLI_VERSION
-                    / CLI_COMMAND
-                ),
+                str(Path(".nddev-software/antigravity-cli/versions") / CLI_VERSION / CLI_COMMAND),
                 version_binary_content,
             ),
         ):
             if content is None or sha256_bytes(content) != stamp["binary_sha256"]:
                 drift.append(label)
-        installed = binary_content is not None and version_binary_content is not None and not any(
-            item.startswith(".nddev-software") or item == "bin/agy" for item in drift
+        installed = (
+            binary_content is not None
+            and version_binary_content is not None
+            and not any(item.startswith(".nddev-software") or item == "bin/agy" for item in drift)
         )
         for key, expected in expected_software_identity().items():
             if stamp[key] != expected:
@@ -3245,7 +3364,9 @@ def software_status_locked(target: Path) -> dict[str, Any]:
         or binary.is_symlink()
         or (
             software_root(target).exists()
-            and any(path.is_file() or path.is_symlink() for path in software_root(target).rglob("*"))
+            and any(
+                path.is_file() or path.is_symlink() for path in software_root(target).rglob("*")
+            )
         )
     ):
         drift.append("software-stamp")
@@ -3414,7 +3535,12 @@ def install_cli_unlocked(target: Path, command: str) -> dict[str, Any]:
     promotion = promote_cleanup_items(
         target,
         "software-version-replacement",
-        [(rollback_version if lstat_exists(rollback_version) else None, "software rollback directory")],
+        [
+            (
+                rollback_version if lstat_exists(rollback_version) else None,
+                "software rollback directory",
+            )
+        ],
     )
     if promotion is not None:
         cleanup_pending_result = True
@@ -3483,7 +3609,9 @@ def remove_cli(target: Path) -> dict[str, Any]:
         root = software_root(target)
         command_path = managed_cli_path(target)
         items.append((root if lstat_exists(root) else None, "removed software root"))
-        items.append((command_path if lstat_exists(command_path) else None, "removed software command"))
+        items.append(
+            (command_path if lstat_exists(command_path) else None, "removed software command")
+        )
         promotion = promote_cleanup_items(target, "software-removal", items)
         cleanup_pending_result = False
         if promotion is not None:
@@ -3565,14 +3693,19 @@ def target_lock(
     parent_descriptor: int | None = None
     lock_descriptor: int | None = None
     lock_acquired = False
-    cold_read_without_product_anchor = False
+    cold_read_snapshot: tuple[Any, ...] | None = None
+    body_completed = False
     canonical: Path | None = None
     try:
         if read_only:
             product_handle = open_external_global_lock(create=False, exclusive=False)
             if product_handle is None:
-                cold_read_without_product_anchor = True
                 canonical = validate_target_identity_for_lock(target)
+                cold_read_snapshot = cold_read_external_namespace_snapshot(
+                    canonical,
+                    target,
+                    fail_on_orphan_target_state=True,
+                )
             else:
                 lexical_handle = acquire_lexical_external_handle(
                     product_handle.product_root,
@@ -3622,10 +3755,12 @@ def target_lock(
         if not ensure_private_target(canonical, create=create):
             if allow_missing or read_only:
                 yield canonical
+                body_completed = True
                 return
             fail("--target is missing")
         if read_only:
             yield canonical
+            body_completed = True
             return
         lock_parent = canonical / TARGET_LOCK_DIR_NAME
         lock_file = lock_parent / TARGET_LOCK_FILE_NAME
@@ -3689,6 +3824,7 @@ def target_lock(
             OWNER_READ_EXEC_DIR_MODE,
         )
         yield canonical
+        body_completed = True
     finally:
         release_error: BaseException | None = None
 
@@ -3721,8 +3857,14 @@ def target_lock(
             remember(lambda: release_external_handle(lexical_handle))
         if product_handle is not None:
             remember(lambda: release_external_handle(product_handle))
-        if cold_read_without_product_anchor and external_global_anchor_exists():
-            release_error = release_error or BootstrapColdReadRace()
+        if cold_read_snapshot is not None and body_completed and release_error is None:
+            latest_snapshot = cold_read_external_namespace_snapshot(
+                canonical,
+                target,
+                fail_on_orphan_target_state=False,
+            )
+            if latest_snapshot != cold_read_snapshot:
+                release_error = BootstrapColdReadRace()
         if release_error is not None:
             raise release_error
 
@@ -3896,7 +4038,9 @@ def validate_common_backup_envelope(
     build_version = validate_non_empty_string(envelope["build_version"], "backup build_version")
     if validate_exact_int(envelope["slot"], "backup slot") != slot:
         fail("backup slot identity is invalid")
-    if validate_non_empty_string(envelope["canonical_target"], "backup canonical_target") != str(target):
+    if validate_non_empty_string(envelope["canonical_target"], "backup canonical_target") != str(
+        target
+    ):
         fail("backup belongs to a different canonical target")
     validate_sha256_digest(envelope["stamp_sha256"], "backup stamp_sha256")
     return build_version
@@ -4369,10 +4513,7 @@ def validate_launch_args(child_args: list[str]) -> None:
     for argument in child_args:
         for option in MANAGED_LAUNCH_OPTION_NAMES:
             if argument == option or argument.startswith(f"{option}="):
-                fail(
-                    "launch argument overrides managed Antigravity CLI setup scope: "
-                    f"{argument}"
-                )
+                fail(f"launch argument overrides managed Antigravity CLI setup scope: {argument}")
 
 
 def normalized_launch_child_args(child_args: list[str]) -> list[str]:

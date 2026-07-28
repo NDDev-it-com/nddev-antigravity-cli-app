@@ -176,6 +176,7 @@
     "relative_target_rejected": true,
     "target_symlinks_rejected": true,
     "canonical_target_binding": true,
+    "read_only_cold_orphan_target_anchors_fail_closed": true,
     "preserve_unmanaged_files": true,
     "preserve_unmanaged_settings_keys": true,
     "reject_symlink_managed_files": true,
