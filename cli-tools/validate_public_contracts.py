@@ -7,7 +7,6 @@ import ast
 import json
 import re
 import stat
-import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -215,24 +214,8 @@ def public_tree_paths(errors: list[str]) -> set[str]:
         if private_markers:
             errors.append(f"public tree contains private marker path {private_markers}: {relative}")
             continue
-        paths.add(relative)
+        paths = paths | {relative}
     return paths
-
-
-def tracked_files(errors: list[str]) -> set[str] | None:
-    if not (ROOT / ".git").exists():
-        return None
-    result = subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode != 0:
-        errors.append(f"git ls-files failed: {result.stderr.strip()}")
-        return set()
-    return {line for line in result.stdout.splitlines() if line}
 
 
 def is_normalized_release_path(value: str) -> bool:
@@ -343,23 +326,23 @@ def release_runtime_required_paths(
         if isinstance(source_roots, dict):
             for value in source_roots.values():
                 if isinstance(value, str) and value:
-                    required.add(value)
+                    required = required | {value}
     if isinstance(contract, dict):
         setup_system = contract.get("setup_system")
         if isinstance(setup_system, dict):
             for key in ("catalog_root", "profile_root"):
                 value = setup_system.get(key)
                 if isinstance(value, str) and value:
-                    required.add(value)
+                    required = required | {value}
         for key in ("manifest_ref", "version_ref"):
             value = contract.get(key)
             if isinstance(value, str) and "/" in value:
-                required.add(value.split("/", 1)[0])
+                required = required | {value.split("/", 1)[0]}
         runtime = contract.get("runtime_compatibility")
         if isinstance(runtime, dict):
             baseline_ref = runtime.get("baseline_ref")
             if isinstance(baseline_ref, str) and "/" in baseline_ref:
-                required.add(baseline_ref.split("/", 1)[0])
+                required = required | {baseline_ref.split("/", 1)[0]}
     return required
 
 
@@ -372,7 +355,7 @@ def check_release_workflow(
     if text is None:
         return
     public_paths = public_tree_paths(errors)
-    tracked = tracked_files(errors)
+    tracked = public_paths
 
     uses = re.findall(r"(?m)^    uses:\s+(\S+)(?:\s+#\s*(\S+))?\s*$", text)
     if uses != [(RELEASE_SUPPLY_CHAIN_CALLER, RELEASE_SUPPLY_CHAIN_VERSION_COMMENT)]:
