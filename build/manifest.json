@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "name": "nddev-antigravity-cli-app",
-  "build_version": "0.2.0",
+  "build_version": "0.2.1",
   "entrypoint": "python3 cli-tools/nddev_antigravity_cli.py",
   "source_roots": {
     "setups": "setups",
@@ -86,19 +86,7 @@
       "status",
       "plan",
       "install",
-      "apply",
-      "switch",
-      "migrate",
-      "restore",
-      "remove",
-      "software-status",
-      "install-cli",
-      "update-cli"
-    ],
-    "target_required": [
-      "status",
-      "plan",
-      "install",
+      "update",
       "apply",
       "switch",
       "migrate",
@@ -107,6 +95,22 @@
       "software-status",
       "install-cli",
       "update-cli",
+      "remove-cli"
+    ],
+    "target_required": [
+      "status",
+      "plan",
+      "install",
+      "update",
+      "apply",
+      "switch",
+      "migrate",
+      "restore",
+      "remove",
+      "software-status",
+      "install-cli",
+      "update-cli",
+      "remove-cli",
       "launch"
     ],
     "plan_mutates": false,
@@ -122,8 +126,10 @@
     "requires_current_target_owned_software": true,
     "target_lock_held_through_child": true,
     "target_lock_mechanism": "persistent-target-internal-flock-file",
-    "authoritative_lock_mechanism": "external-bootstrap-flock-file",
-    "external_lock_binding": "product-namespaced-sha256-canonical-target-json",
+    "authoritative_lock_mechanism": "monotonic-product-and-canonical-target-bootstrap-flock-files",
+    "read_only_cold_orphan_target_anchors_fail_closed": true,
+    "read_only_cold_product_namespace_must_be_empty_without_global_lock": true,
+    "external_lock_binding": "atomic-no-replace-product-namespaced-json",
     "external_lock_persistent": true,
     "external_lock_exposed_to_child": false,
     "target_internal_lock_role": "target-local-state",
@@ -148,10 +154,10 @@
       "--agent"
     ]
   },
-  "software_install": {
+    "software_install": {
     "supported": true,
     "mechanism": "official-antigravity-install-manifest",
-    "version": "1.1.7",
+    "version": "1.1.8",
     "command": "agy",
     "installer_url": "https://antigravity.google/cli/install.sh",
     "installer_sha256": "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640",
@@ -165,17 +171,19 @@
     "status_command": "python3 cli-tools/nddev_antigravity_cli.py software-status --target <absolute-home-target> [--json]",
     "install_command": "python3 cli-tools/nddev_antigravity_cli.py install-cli --target <absolute-home-target> [--json]",
     "update_command": "python3 cli-tools/nddev_antigravity_cli.py update-cli --target <absolute-home-target> [--json]",
+    "remove_command": "python3 cli-tools/nddev_antigravity_cli.py remove-cli --target <absolute-home-target> [--json]",
     "status_fields": [
       "installed",
       "current",
-      "drift"
+      "drift",
+      "cleanup_pending"
     ],
     "install_precondition": "absent managed software",
     "update_precondition": "existing managed software",
-    "update_current_behavior": "idempotent no-op without downloading",
+    "update_current_behavior": "idempotent no-op without downloading when cleanup_pending is false",
     "stage_and_atomic_swap": true,
     "managed_command": "bin/agy",
-    "layout": ".nddev-software/antigravity-cli/versions/1.1.7/",
+    "layout": ".nddev-software/antigravity-cli/versions/1.1.8/",
     "artifact_pin_fields": [
       "version",
       "url",
@@ -191,5 +199,40 @@
     "slots": 10,
     "canonical_target_bound": true,
     "pool_lock": true
+  },
+  "cleanup_policy": {
+    "journal": "NDDEV-ANTIGRAVITY-CLI-CLEANUP.json",
+    "stage": "NDDEV-ANTIGRAVITY-CLI-CLEANUP-STAGE.json",
+    "parent": ".nddev-antigravity-cli-cleanup",
+    "immutable_pending_journal": true,
+    "read_only_repairs": false,
+    "mutation_drains_before_active_changes": true,
+    "top_level_result_field": "cleanup_pending"
+  },
+  "platform_support": {
+    "supported_hosts": [
+      "macos-arm64",
+      "macos-x64",
+      "ubuntu-glibc-arm64",
+      "ubuntu-glibc-x64"
+    ],
+    "unsupported_categories": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
+    "official_platform_mapping": {
+      "macos-arm64": "darwin_arm64",
+      "macos-x64": "darwin_amd64",
+      "ubuntu-glibc-arm64": "linux_arm64",
+      "ubuntu-glibc-x64": "linux_amd64"
+    },
+    "official_unsupported_platforms": {
+      "windows": [
+        "windows_arm64",
+        "windows_amd64"
+      ]
+    }
   }
 }

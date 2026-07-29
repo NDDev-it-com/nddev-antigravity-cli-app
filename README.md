@@ -12,6 +12,7 @@ the operator's live `~/.gemini` state.
 - Review-gated permission profile: `safe`
 - Managed command: `agy`
 - Managed target executable: `bin/agy`
+- Supported hosts: macOS arm64/x64 and Ubuntu glibc arm64/x64
 
 Exact profile payloads are owned by `profiles/`. Exact runtime pins and source
 provenance are owned by `references/antigravity-cli-baseline.json`. Manager
@@ -67,6 +68,7 @@ Inspect, migrate, restore, or remove managed state:
 
 ```bash
 python3 cli-tools/nddev_antigravity_cli.py status --target /absolute/agy-home --json
+python3 cli-tools/nddev_antigravity_cli.py update --target /absolute/agy-home --json
 python3 cli-tools/nddev_antigravity_cli.py migrate --profile full-auto --target /absolute/agy-home --json
 python3 cli-tools/nddev_antigravity_cli.py restore --backup 0 --target /absolute/agy-home --json
 python3 cli-tools/nddev_antigravity_cli.py remove --target /absolute/agy-home --json
@@ -87,9 +89,12 @@ home directory.
 python3 cli-tools/nddev_antigravity_cli.py software-status --target /absolute/agy-home --json
 python3 cli-tools/nddev_antigravity_cli.py install-cli --target /absolute/agy-home --json
 python3 cli-tools/nddev_antigravity_cli.py update-cli --target /absolute/agy-home --json
+python3 cli-tools/nddev_antigravity_cli.py remove-cli --target /absolute/agy-home --json
 ```
 
-`software-status` is read-only and never executes `agy`.
+`software-status` is read-only and never executes `agy`. Read-only commands
+report cleanup-pending state but never repair it; the next mutation drains valid
+pending cleanup before active changes.
 
 Launch through the managed target:
 

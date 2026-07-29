@@ -13,6 +13,8 @@ does not install into a live user home or system prefix.
 - `update-cli --target <absolute-target>` requires existing managed software.
   If the target is already current, it returns an idempotent no-op without
   downloading.
+- `remove-cli --target <absolute-target>` removes only target-owned software
+  while preserving setup-managed Antigravity configuration.
 
 ## Source and integrity
 
@@ -43,9 +45,9 @@ Lifecycle locking is code-owned by `cli-tools/nddev_antigravity_cli.py`. The
 stable guarantee is that target lifecycle mutations are serialized for the
 explicit target, runtime state remains writable for launched Antigravity, and
 unsafe ownership or path-shape changes fail closed. Exact lock topology, modes,
-ordering, binding, rollback, and recovery semantics are declared by the manager
-and summarized machine-readably in `build/manifest.json` and
-`config/nddev-contract.json`.
+ordering, binding, rollback, cleanup-pending, and recovery semantics are
+declared by the manager and summarized machine-readably in
+`build/manifest.json` and `config/nddev-contract.json`.
 
 ## Launch safety
 
