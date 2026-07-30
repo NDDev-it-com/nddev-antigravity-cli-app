@@ -1,53 +1,60 @@
-# nddev-antigravity-cli-app
+<!--
+GENERATED FILE - DO NOT EDIT DIRECTLY
+generator: gds
+bundle: 0.1.0-dev
+source-commit: 97e8bbaa3a0734b156b03bad704503bc46d7575b
+input-digest: sha256:e9b96862bb45b4250a0b499a96e0dd63f91e15917acf22efc0cfdddbef47cab1
+output-digest: sha256:a6b6b52383b8d7db7c55e79d8183be031ea6c0dfca5e23ba0db43c13d5b1e2be
+edit-source:
+  - .gds/repository.yaml
+  - policies/base/repository-default.yaml
+  - policies/owners/organization-default.yaml
+  - policies/roles/public-module.yaml
+  - templates/agents/repository.md.tmpl
+  - templates/github-actions/go.yml.tmpl
+  - templates/harnesses/claude.md.tmpl
+-->
+# GDS repository contract
 
-This public repository owns Antigravity CLI setup-manager runtime
-implementation, setup/profile payloads, public contracts, documentation, and
-release metadata only.
+## Scope
+
+- Repository ID: `repo_01KYFBZ3T30ZATKKPGDWP8F8FW`.
+- Roles: `module`.
+- Canonical repository facts: `.gds/repository.yaml`.
+- Applied bundle: `.gds/bundle.lock.yaml` (`0.1.0-dev`).
+- Compiled policy: `.gds/compiled-policy.json`.
 
 ## Boundaries
 
-- Keep public implementation in this repository.
-- Keep private validation, benchmarks, durable memories, release evidence,
-  registry pins, and CI orchestration outside this repository.
-- Do not commit secrets, credentials, runtime logs, caches, generated evidence,
-  or live Antigravity state.
-- Do not mutate the operator's live `~/.gemini` state.
+- This Git repository is one independent mutation boundary.
+- Preserve unrelated branches, worktrees, submodules, and dirty changes.
+- Resolve cross-repository work with `gds context --json` before acting.
+- Generated files are projections; change their canonical inputs and regenerate.
 
-## Native Antigravity CLI surfaces
+## Safety
 
-Use documented native surfaces only:
+- External writes require explicit approval: `true`.
+- Generated projection edits: `forbidden`.
+- Private parent context persistence: `forbidden`.
+- Visibility contract: `public`; data classification: `public`.
 
-- `agy`
-- `~/.gemini/antigravity-cli/settings.json`
-- `~/.gemini/antigravity-cli/plugins/<plugin_name>/`
-- plugin `skills/`, `agents/`, and `rules/`
-- documented workspace/global skills, agents, rules, hooks, and MCP paths when
-  the public contract intentionally owns them
+## Development
 
-Do not emulate a plugin marketplace. The default `nddev-builder` setup does
-not install hooks, MCP servers, or credentials.
+- Test: `python3 -m json.tool config/nddev-contract.json`.
 
-## Source owners
+## Agent routing
 
-- Version and tested runtime: `VERSION`, `build/version.json`
-- Public contract and manifest: `config/nddev-contract.json`,
-  `build/manifest.json`
-- Runtime source ledger and artifact pins:
-  `references/antigravity-cli-baseline.json`
-- Manager behavior: `cli-tools/nddev_antigravity_cli.py`
-- Public validator: `cli-tools/validate_public_contracts.py`
-- Profile payloads: `profiles/`
-- Content setup payload: `setups/nddev-builder/`
+- Start here: run `gds-orient` (or `gds context --json`) to resolve scope before
+  any cross-repository work. It is the orientation entry point.
+- Active skill profiles: `core, module`. Five profiles exist in total
+  (`core`, `estate-admin`, `module`, `device`, `portfolio`); only the listed ones
+  are active for this repository. The catalog is `skills/registry.yaml`, and each
+  skill lives under `skills/canonical/<name>/SKILL.md`.
+- Use on-demand skills for procedures; do not duplicate them here.
+- Treat docs and memories as derived evidence, not mutation authority.
 
-Point to these files instead of copying volatile versions, pins, digests,
-profile payloads, setup file lists, or launch policy into long-lived prose.
+## Done
 
-## Public checks
-
-Run from the module root:
-
-```bash
-python3 cli-tools/validate_public_contracts.py
-python3 -m py_compile cli-tools/nddev_antigravity_cli.py cli-tools/validate_public_contracts.py
-python3 cli-tools/nddev_antigravity_cli.py list --json
-```
+- Required verification is complete or explicitly `NOT_PROVEN`.
+- Git state and every affected repository boundary are classified.
+- No private data, secret, or unapproved generated drift is introduced.
