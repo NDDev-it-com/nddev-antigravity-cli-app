@@ -806,8 +806,8 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
     if baseline is not None:
         if baseline.get("schema_version") != 2:
             errors.append("baseline schema_version must be 2")
-        if baseline.get("verified_date") != "2026-07-28":
-            errors.append("baseline verified_date mismatch")
+        if "verified_date" in baseline:
+            errors.append("baseline contains observation-only verified_date")
         if version is not None:
             release = baseline.get("release", {})
             if release.get("tag") != version.get("antigravity_cli_release_tag"):
