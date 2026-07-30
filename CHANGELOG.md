@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Capture and strictly resolve the caller workspace once at launch entry and
+  pass it explicitly as the Antigravity child working directory.
+- Declare target/workspace roles in public status and contracts without adding
+  an unverified native workspace flag.
+
 ## 0.2.1
 
 - Harden monotonic product and canonical-target coordination, cleanup-pending

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "build_version": "0.2.1",
+  "build_version": "0.2.2",
   "antigravity_cli_tested": "1.1.8",
   "antigravity_cli_min": "1.1.8",
   "antigravity_cli_release_tag": "1.1.8",

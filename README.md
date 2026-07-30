@@ -111,6 +111,12 @@ environment, denial, and recovery mechanics are code-owned by
 `cli-tools/nddev_antigravity_cli.py`; machine-readable release contracts live in
 `build/manifest.json` and `config/nddev-contract.json`.
 
+At launch-command entry, the manager captures the caller's current directory
+once, strictly resolves it as an existing accessible project workspace, and
+passes it explicitly as the child working directory. The managed target
+remains the isolated Antigravity configuration and runtime home. No native
+workspace flag is added by this module.
+
 ## Public validation
 
 Run from the module root:

@@ -35,6 +35,18 @@ MANAGED_LAUNCH_OPTION_NAMES = [
     "--cwd",
     "--agent",
 ]
+
+
+def validate_launch_scope(owner: str, launch: dict[str, Any], errors: list[str]) -> None:
+    expected = {
+        "target_role": "managed-configuration-runtime-home",
+        "workspace_source": "captured-caller-current-directory",
+        "child_working_directory_policy": "strict-resolved-caller-workspace",
+        "native_workspace_argument": None,
+    }
+    for key, value in expected.items():
+        if launch.get(key) != value:
+            errors.append(f"{owner}: runtime_launch.{key} mismatch")
 BUILDER_ROOT = ".gemini/antigravity-cli/plugins/nddev-builder"
 BUILDER_MANAGED_FILES = [
     f"{BUILDER_ROOT}/plugin.json",
@@ -605,6 +617,7 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             if command not in policy.get("json_supported", []):
                 errors.append(f"build/manifest.json: command_policy missing {command}")
         launch = manifest.get("runtime_launch", {})
+        validate_launch_scope("build/manifest.json", launch, errors)
         if launch.get("managed_override_args_blocked") != MANAGED_LAUNCH_OPTION_NAMES:
             errors.append("build/manifest.json: launch override policy mismatch")
         for key in (
@@ -711,6 +724,7 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
         if contract.get("builder", {}).get("marketplace") is not None:
             errors.append("config/nddev-contract.json: builder marketplace must be null")
         launch = contract.get("runtime_launch", {})
+        validate_launch_scope("config/nddev-contract.json", launch, errors)
         if launch.get("direct_command") is not None:
             errors.append("config/nddev-contract.json: runtime_launch.direct_command must be null")
         for key in (
@@ -951,6 +965,9 @@ def check_runtime_lock_source(errors: list[str]) -> None:
         "BOOTSTRAP_GLOBAL_LOCK_NAME",
         "protected_launch_handoff",
         "subprocess.Popen",
+        "caller_workspace = resolve_caller_workspace()",
+        "cwd=str(workspace)",
+        '"launch_scope": launch_scope_status()',
     )
     for fragment in required_fragments:
         if fragment not in source:

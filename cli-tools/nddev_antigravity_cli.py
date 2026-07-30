@@ -4632,7 +4632,29 @@ def validate_launch_ready(target: Path, child_args: list[str]) -> Path:
         return validate_launch_ready_unlocked(target, child_args)
 
 
-def launch(target: Path, child_args: list[str]) -> int:
+def resolve_caller_workspace() -> Path:
+    try:
+        workspace = Path.cwd().resolve(strict=True)
+        info = workspace.stat()
+    except (FileNotFoundError, OSError) as exc:
+        fail(f"cannot resolve caller workspace: {exc}")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("caller workspace must resolve to a directory")
+    if not os.access(workspace, os.R_OK | os.X_OK):
+        fail("caller workspace must be readable and searchable")
+    return workspace
+
+
+def launch_scope_status() -> dict[str, Any]:
+    return {
+        "target_role": "managed-configuration-runtime-home",
+        "workspace_source": "captured-caller-current-directory",
+        "child_working_directory_policy": "strict-resolved-caller-workspace",
+        "native_workspace_argument": None,
+    }
+
+
+def launch(target: Path, workspace: Path, child_args: list[str]) -> int:
     child_args = normalized_launch_child_args(child_args)
     with target_lock(target, create=False) as target:
         drain_cleanup_before_mutation(target)
@@ -4640,7 +4662,11 @@ def launch(target: Path, child_args: list[str]) -> int:
         env = build_launch_env(target)
         with protected_launch_handoff(target):
             executable = recheck_launch_executable(target, stamp)
-            process = subprocess.Popen([str(executable), *child_args], env=env)
+            process = subprocess.Popen(
+                [str(executable), *child_args],
+                cwd=str(workspace),
+                env=env,
+            )
             return process.wait()
 
 
@@ -4699,6 +4725,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
         args = parse_args(raw_argv)
+        caller_workspace = resolve_caller_workspace() if args.command == "launch" else None
         if args.command == "list":
             emit(
                 {
@@ -4728,7 +4755,13 @@ def main(argv: list[str] | None = None) -> int:
         }:
             current_host_id()
         if args.command == "status":
-            emit(current_status(resolve_target(args.target)), as_json=args.json)
+            emit(
+                {
+                    **current_status(resolve_target(args.target)),
+                    "launch_scope": launch_scope_status(),
+                },
+                as_json=args.json,
+            )
             return 0
         if args.command == "software-status":
             emit(software_status(resolve_target(args.target)), as_json=args.json)
@@ -4768,7 +4801,9 @@ def main(argv: list[str] | None = None) -> int:
             emit(remove_setup(resolve_target(args.target)), as_json=args.json)
             return 0
         if args.command == "launch":
-            return launch(resolve_target(args.target), list(args.child_args))
+            if caller_workspace is None:
+                fail("caller workspace was not resolved")
+            return launch(resolve_target(args.target), caller_workspace, list(args.child_args))
         fail(f"unsupported command: {args.command}")
     except (ManagerError, AntigravityArgumentError) as exc:
         if wants_json(raw_argv):

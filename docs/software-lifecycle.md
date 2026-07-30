@@ -58,4 +58,9 @@ argument rejection, child environment, and same-UID no-sandbox boundary are
 owned by `cli-tools/nddev_antigravity_cli.py` with contract pointers in
 `build/manifest.json` and `config/nddev-contract.json`.
 
+Launch captures and strictly resolves the caller current directory once and
+uses that project workspace as the explicit child working directory. It stays
+separate from the managed target home, and the manager does not invent a
+native Antigravity workspace flag.
+
 Legacy managed targets are launch-denied until migrated.
