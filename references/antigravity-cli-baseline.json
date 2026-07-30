@@ -4,17 +4,11 @@
   "verified_version_ref": "build/version.json:antigravity_cli_tested",
   "release": {
     "tag": "1.1.8",
-    "published_at": "2026-07-28T00:59:10Z",
-    "url": "https://github.com/google-antigravity/antigravity-cli/releases/tag/1.1.8",
-    "latest_api": "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest"
+    "url": "https://github.com/google-antigravity/antigravity-cli/releases/tag/1.1.8"
   },
   "install_script": {
     "url": "https://antigravity.google/cli/install.sh",
     "sha256": "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640",
-    "observed_flags": [
-      "--dir",
-      "--help"
-    ],
     "default_target": "~/.local/bin/agy",
     "staging_directory": "~/.cache/antigravity/staging",
     "post_install_command": "agy install",
@@ -79,18 +73,6 @@
       "support": "supported-vendor-artifact-for-macos-x64",
       "size": 50542433,
       "sha256": "76afe4622132596f68557ef4531ec2e2dcd40e8025f6fb4435a273ce2eec0027"
-    },
-    "agy_cli_windows_arm64.zip": {
-      "platform": "windows_arm64",
-      "support": "official-but-unsupported",
-      "size": 43925314,
-      "sha256": "2e5c5a5b67b4d2a197bc9eb5608f61e6a2f7d602b1012beb7e6b3c158e2a909c"
-    },
-    "agy_cli_windows_x64.zip": {
-      "platform": "windows_amd64",
-      "support": "official-but-unsupported",
-      "size": 48081576,
-      "sha256": "e234c850e3d835d278bb9b4aa202c34d53e399eeebc3d9d1a575576896cdecee"
     }
   },
   "runtime": {

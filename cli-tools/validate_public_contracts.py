@@ -798,8 +798,14 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             release = baseline.get("release", {})
             if release.get("tag") != version.get("antigravity_cli_release_tag"):
                 errors.append("baseline release tag mismatch")
-            if release.get("published_at") != version.get("antigravity_cli_release_published_at"):
-                errors.append("baseline release timestamp mismatch")
+        forbidden_observation_fields = {
+            "published_at",
+            "latest_api",
+        }
+        if forbidden_observation_fields.intersection(baseline.get("release", {})):
+            errors.append("baseline release contains observation-only metadata")
+        if "observed_flags" in baseline.get("install_script", {}):
+            errors.append("baseline install script contains observation-only flags")
         if baseline.get("configuration", {}).get("marketplace") is not None:
             errors.append("baseline marketplace must be null")
         manifests = baseline.get("platform_manifests")
@@ -843,22 +849,10 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
                 50542433,
                 "76afe4622132596f68557ef4531ec2e2dcd40e8025f6fb4435a273ce2eec0027",
             ),
-            "agy_cli_windows_arm64.zip": (
-                "windows_arm64",
-                "official-but-unsupported",
-                43925314,
-                "2e5c5a5b67b4d2a197bc9eb5608f61e6a2f7d602b1012beb7e6b3c158e2a909c",
-            ),
-            "agy_cli_windows_x64.zip": (
-                "windows_amd64",
-                "official-but-unsupported",
-                48081576,
-                "e234c850e3d835d278bb9b4aa202c34d53e399eeebc3d9d1a575576896cdecee",
-            ),
         }
         assets = baseline.get("release_assets")
         if not isinstance(assets, dict) or sorted(assets) != sorted(expected_assets):
-            errors.append("baseline release assets must cover the six official artifacts")
+            errors.append("baseline release assets must cover supported product artifacts only")
         else:
             for name, (platform_id, support, size, digest) in expected_assets.items():
                 meta = assets.get(name, {})
