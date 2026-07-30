@@ -47,6 +47,8 @@ def validate_launch_scope(owner: str, launch: dict[str, Any], errors: list[str])
     for key, value in expected.items():
         if launch.get(key) != value:
             errors.append(f"{owner}: runtime_launch.{key} mismatch")
+
+
 BUILDER_ROOT = ".gemini/antigravity-cli/plugins/nddev-builder"
 BUILDER_MANAGED_FILES = [
     f"{BUILDER_ROOT}/plugin.json",
