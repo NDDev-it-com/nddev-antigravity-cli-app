@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "name": "nddev-antigravity-cli-app",
-  "build_version": "0.2.2",
+  "build_version": "0.2.3",
   "entrypoint": "python3 cli-tools/nddev_antigravity_cli.py",
   "source_roots": {
     "setups": "setups",
@@ -161,7 +161,7 @@
     "software_install": {
     "supported": true,
     "mechanism": "official-antigravity-install-manifest",
-    "version": "1.1.8",
+    "version": "1.1.9",
     "command": "agy",
     "installer_url": "https://antigravity.google/cli/install.sh",
     "installer_sha256": "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640",
@@ -187,7 +187,7 @@
     "update_current_behavior": "idempotent no-op without downloading when cleanup_pending is false",
     "stage_and_atomic_swap": true,
     "managed_command": "bin/agy",
-    "layout": ".nddev-software/antigravity-cli/versions/1.1.8/",
+    "layout": ".nddev-software/antigravity-cli/versions/1.1.9/",
     "artifact_pin_fields": [
       "version",
       "url",

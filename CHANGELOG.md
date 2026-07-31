@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- Refresh the tested Antigravity CLI runtime and official artifact pins to 1.1.9.
+
 ## 0.2.2
 
 - Capture and strictly resolve the caller workspace once at launch entry and
