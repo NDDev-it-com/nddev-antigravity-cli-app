@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.3
+## [0.2.3]
 
 - Refresh the tested Antigravity CLI runtime and official artifact pins to 1.1.9.
 
