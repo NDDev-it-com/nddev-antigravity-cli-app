@@ -15,7 +15,7 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
 PRODUCT_NAME = "nddev-antigravity-cli-app"
-CLI_VERSION = "1.1.9"
+CLI_VERSION = "1.1.10"
 CLAUDE_BRIDGE_DIR = ".claude"
 CLAUDE_BRIDGE_PATH = ".claude/CLAUDE.md"
 CLAUDE_BRIDGE_BYTES = b"@../AGENTS.md\n"
