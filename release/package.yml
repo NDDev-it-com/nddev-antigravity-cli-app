@@ -1,0 +1,9 @@
+schema_version: 1
+package_name: nddev-antigravity-cli-app
+version_source: VERSION
+archive_paths: >-
+  README.md LICENSE VERSION CHANGELOG.md SECURITY.md AGENTS.md .claude .gitignore .gds .github
+  build cli-tools config docs references profiles setups release
+runtime_paths: >-
+  README.md LICENSE VERSION AGENTS.md .claude build cli-tools config references profiles
+  setups

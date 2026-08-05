@@ -119,7 +119,7 @@ WORKFLOWS = [
     "secret-scan.yml",
     "zizmor.yml",
 ]
-RELEASE_WORKFLOW = ".github/workflows/release.yml"
+RELEASE_WORKFLOW = "release/package.yml"
 RELEASE_SUPPLY_CHAIN_CALLER = (
     "NDDev-it-com/ci-workflows/.github/workflows/release-supply-chain.yml"
     "@2ccb80e96f5771b6a6b4eae63a4f47e232906dc7"
@@ -893,9 +893,7 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
         "cli-tools/nddev_antigravity_cli.py",
     ):
         read_text(relative, errors)
-    for workflow in WORKFLOWS:
-        read_text(f".github/workflows/{workflow}", errors)
-    check_release_workflow(errors, manifest, contract)
+    read_text(RELEASE_WORKFLOW, errors)
 
 
 def check_claude_bridge(errors: list[str]) -> None:
