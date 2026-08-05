@@ -122,9 +122,13 @@ WORKFLOWS = [
 RELEASE_WORKFLOW = ".github/workflows/release.yml"
 RELEASE_SUPPLY_CHAIN_CALLER = (
     "NDDev-it-com/ci-workflows/.github/workflows/release-supply-chain.yml"
-    "@2ccb80e96f5771b6a6b4eae63a4f47e232906dc7"
+    "@f6ea891f09653b8d449098817c8acfdb510731f6"
 )
-RELEASE_SUPPLY_CHAIN_VERSION_COMMENT = "0.12.0"
+RELEASE_PROMOTION_CALLER = (
+    "NDDev-it-com/ci-workflows/.github/workflows/release-promotion-gate.yml"
+    "@f6ea891f09653b8d449098817c8acfdb510731f6"
+)
+RELEASE_SUPPLY_CHAIN_VERSION_COMMENT = "0.14.0-dev"
 RELEASE_JOB_PERMISSIONS = {
     "attestations": "write",
     "artifact-metadata": "write",
@@ -312,9 +316,15 @@ def workflow_block_tokens(text: str, key: str, errors: list[str]) -> set[str]:
     return set(tokens)
 
 
-def job_permissions(text: str) -> dict[str, str] | None:
+def job_permissions(text: str, job_id: str) -> dict[str, str] | None:
     lines = text.splitlines()
-    for index, line in enumerate(lines):
+    try:
+        job_index = lines.index(f"  {job_id}:")
+    except ValueError:
+        return None
+    for index, line in enumerate(lines[job_index + 1 :], start=job_index + 1):
+        if line.startswith("  ") and not line.startswith("    "):
+            break
         if line == "    permissions:":
             permissions: dict[str, str] = {}
             for following in lines[index + 1 :]:
@@ -372,14 +382,27 @@ def check_release_workflow(
     tracked = public_paths
 
     uses = re.findall(r"(?m)^    uses:\s+(\S+)(?:\s+#\s*(\S+))?\s*$", text)
-    if uses != [(RELEASE_SUPPLY_CHAIN_CALLER, RELEASE_SUPPLY_CHAIN_VERSION_COMMENT)]:
+    expected_uses = [
+        (RELEASE_PROMOTION_CALLER, RELEASE_SUPPLY_CHAIN_VERSION_COMMENT),
+        (RELEASE_SUPPLY_CHAIN_CALLER, RELEASE_SUPPLY_CHAIN_VERSION_COMMENT),
+    ]
+    if uses != expected_uses:
         errors.append(f"{RELEASE_WORKFLOW}: reusable release caller pin mismatch")
     if re.search(r"(?m)^permissions:\s+\{\}\s*$", text) is None:
         errors.append(f"{RELEASE_WORKFLOW}: top-level permissions must be empty")
-    if job_permissions(text) != RELEASE_JOB_PERMISSIONS:
+    if job_permissions(text, "promotion") != {"contents": "read"}:
+        errors.append(f"{RELEASE_WORKFLOW}: promotion job permissions mismatch")
+    if job_permissions(text, "publish") != RELEASE_JOB_PERMISSIONS:
         errors.append(f"{RELEASE_WORKFLOW}: publish job permissions mismatch")
-    if workflow_scalar(text, "version") != "${{ github.ref_name }}":
+    if re.findall(r"(?m)^      version:\s+(.+?)\s*$", text) != [
+        "${{ github.ref_name }}",
+        "${{ github.ref_name }}",
+    ]:
         errors.append(f"{RELEASE_WORKFLOW}: release version input mismatch")
+    if "    needs: promotion" not in text.splitlines():
+        errors.append(f"{RELEASE_WORKFLOW}: publication must need promotion")
+    if text.count("      runner: amsterdam") != 2:
+        errors.append(f"{RELEASE_WORKFLOW}: both release jobs must use amsterdam")
     if workflow_scalar(text, "package_name") != PRODUCT_NAME:
         errors.append(f"{RELEASE_WORKFLOW}: package_name input mismatch")
 
