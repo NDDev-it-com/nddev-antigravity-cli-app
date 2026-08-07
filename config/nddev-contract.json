@@ -41,7 +41,7 @@
     "mechanism": "official-antigravity-install-manifest",
     "official_source": "https://antigravity.google/cli/install.sh",
     "command": "agy",
-    "version": "1.1.10",
+    "version": "1.1.11",
     "managed_command": "bin/agy",
     "status_command": "python3 cli-tools/nddev_antigravity_cli.py software-status --target <absolute-home-target> [--json]",
     "install_command": "python3 cli-tools/nddev_antigravity_cli.py install-cli --target <absolute-home-target> [--json]",

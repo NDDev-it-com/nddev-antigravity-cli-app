@@ -15,7 +15,7 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
 PRODUCT_NAME = "nddev-antigravity-cli-app"
-CLI_VERSION = "1.1.10"
+CLI_VERSION = "1.1.11"
 CLAUDE_BRIDGE_DIR = ".claude"
 CLAUDE_BRIDGE_PATH = ".claude/CLAUDE.md"
 CLAUDE_BRIDGE_BYTES = b"@../AGENTS.md\n"
@@ -844,26 +844,26 @@ def check_contracts(errors: list[str], build_version: str | None) -> None:
             "agy_cli_linux_arm64.tar.gz": (
                 "linux_arm64",
                 "supported-vendor-artifact-for-ubuntu-glibc-arm64",
-                48995565,
-                "deeb815d07a656074482b2e428ffd9794a2fffbf5df2056e9bf75936b85ebb49",
+                50825768,
+                "f3a03713e3e3cc84477e115d3fd9de1c232386b09384ba8690df6fc0cb0abbf3",
             ),
             "agy_cli_linux_x64.tar.gz": (
                 "linux_amd64",
                 "supported-vendor-artifact-for-ubuntu-glibc-x64",
-                52482856,
-                "467809635ef00660497607111547e80a0a863c6e8fce43b507cd1ba6bf6ddd66",
+                54459006,
+                "caef1dd4c99c57dee1d1dec2b6c67726df535ea49ec71eabadd36daff8223d19",
             ),
             "agy_cli_mac_arm64.tar.gz": (
                 "darwin_arm64",
                 "supported-vendor-artifact-for-macos-arm64",
-                46131090,
-                "bbc42c75f6e603fd35a70f353f2963e74bb4ea261f89e4256f5f60a78f95bb84",
+                47860779,
+                "97cb909d30dbb2bf232d3d10e5dbc8bc008f0e7030400b515a182e490bdd6f08",
             ),
             "agy_cli_mac_x64.tar.gz": (
                 "darwin_amd64",
                 "supported-vendor-artifact-for-macos-x64",
-                50507284,
-                "8daa903f5135072b3921dbac90f449cb8a778102b03853e8691146665cad06bd",
+                52455201,
+                "a63a189a59a0bd1aeb70236aca0754278f418a4ae6d8ef99c8e3616bfa7a3e73",
             ),
         }
         assets = baseline.get("release_assets")
